@@ -1,64 +1,142 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"reflect"
 	"sync"
-
-	"github.com/LiamHaworth/go-tproxy"
+	"syscall"
 )
 
-func handleTCPConn(conn net.Conn) {
-	log.Printf("Accepting TCP connection from %s with destination of %s", conn.RemoteAddr().String(), conn.LocalAddr().String())
+const SO_ORIGINAL_DST = 80
 
-	remoteConn, err := conn.(*tproxy.Conn).DialOriginalDestination(false)
-	if err != nil {
-		log.Printf("Failed to connect to original destination [%s]: %s", conn.LocalAddr().String(), err)
-	} else {
-		defer remoteConn.Close()
-		defer conn.Close()
+func itod(i uint) string {
+	if i == 0 {
+		return "0"
+	}
+
+	// Assemble decimal in reverse order.
+	var b [32]byte
+	bp := len(b)
+	for ; i > 0; i /= 10 {
+		bp--
+		b[bp] = byte(i%10) + '0'
+	}
+
+	return string(b[bp:])
+}
+
+func GetFdFromConn(l net.Conn) int {
+	v := reflect.ValueOf(l)
+	netFD := reflect.Indirect(reflect.Indirect(v).FieldByName("fd"))
+	pfd := reflect.Indirect(netFD.FieldByName("pfd"))
+	fd := int(pfd.FieldByName("Sysfd").Int())
+	return fd
+}
+
+func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err error) {
+	if clientConn == nil {
+		log.Printf("copy(): oops, dst is nil!")
+		err = errors.New("ERR: clientConn is nil")
 		return
 	}
 
+	// test if the underlying fd is nil
+	remoteAddr := clientConn.RemoteAddr()
+	if remoteAddr == nil {
+		log.Printf("getOriginalDst(): oops, clientConn.fd is nil!")
+		err = errors.New("ERR: clientConn.fd is nil")
+		return
+	}
+
+	srcipport := fmt.Sprintf("%v", clientConn.RemoteAddr())
+
+	// Get original destination
+	// this is the only syscall in the Golang libs that I can find that returns 16 bytes
+	// Example result: &{Multiaddr:[2 0 31 144 206 190 36 45 0 0 0 0 0 0 0 0] Interface:0}
+	// port starts at the 3rd byte and is 2 bytes long (31 144 = port 8080)
+	// IPv4 address starts at the 5th byte, 4 bytes long (206 190 36 45)
+	addr, err := syscall.GetsockoptIPv6Mreq(GetFdFromConn(clientConn), syscall.IPPROTO_IP, SO_ORIGINAL_DST)
+	fmt.Printf("getOriginalDst(): SO_ORIGINAL_DST=%+v\n", addr)
+	if err != nil {
+		log.Printf("GETORIGINALDST|%v->?->FAILEDTOBEDETERMINED|ERR: getsocketopt(SO_ORIGINAL_DST) failed: %v", srcipport, err)
+		return
+	}
+	if err != nil {
+		log.Printf("GETORIGINALDST|%v->?->%v|ERR: could not create a FileConn fron clientConnFile=%+v: %v", srcipport, addr, clientConn, err)
+		return
+	}
+
+	ipv4 = itod(uint(addr.Multiaddr[4])) + "." +
+		itod(uint(addr.Multiaddr[5])) + "." +
+		itod(uint(addr.Multiaddr[6])) + "." +
+		itod(uint(addr.Multiaddr[7]))
+	port = uint16(addr.Multiaddr[2])<<8 + uint16(addr.Multiaddr[3])
+
+	return
+}
+
+func handleRequest(conn net.Conn) {
 	var streamWait sync.WaitGroup
+
+	ip, port, err := getOriginalDst(conn.(*net.TCPConn))
+	if err != nil {
+		log.Fatalf("getOriginalDst: %v", err)
+	}
+
+	fmt.Printf("ip: %s port: %v\n", ip, port)
+	remoteString := fmt.Sprintf("%s:%d", ip, port)
+	remoteConn, err := net.Dial("tcp", remoteString)
+	if err != nil {
+		log.Fatalf("could not dial %s", remoteString)
+	}
+
 	streamWait.Add(2)
 
 	streamConn := func(dst io.Writer, src io.Reader) {
-		io.Copy(dst, src)
-		streamWait.Done()
+		fmt.Printf("streamConn\n")
+		for {
+			n, err := io.Copy(dst, src)
+			if err != nil {
+				log.Printf("io.Copy failed: %v", err)
+				break
+			}
+			if n == 0 {
+				fmt.Printf("n: %d", n)
+				break
+			}
+		}
 	}
 
 	go streamConn(remoteConn, conn)
 	go streamConn(conn, remoteConn)
 
 	streamWait.Wait()
+
+	//io.WriteString(conn, "hello world\r\n\r\n")
+	fmt.Printf("writestring done\n")
 }
 
 func main() {
+
 	var err error
 
-	fmt.Println("t2proxy")
-
-	tcpListener, err := tproxy.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("0.0.0.0"), Port: 3128})
+	l, err := net.Listen("tcp", "127.0.0.1:3128")
 	if err != nil {
-		log.Fatalf("ListenTCP failed: %v", err)
+		log.Fatalf("could not listen: %v", err)
 	}
 
-	for {
-		conn, err := tcpListener.Accept()
-		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
-				log.Printf("Temporary error while accepting connection: %s", netErr)
-			}
+	defer l.Close()
 
-			log.Fatalf("Unrecoverable error while accepting connection: %s", err)
-			return
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			log.Fatalf("accept: %v", err)
 		}
 
-		fmt.Printf("conn: %s -> %s\n", conn.LocalAddr().String(), conn.RemoteAddr().String())
-		go handleTCPConn(conn)
-
+		go handleRequest(conn)
 	}
 }
