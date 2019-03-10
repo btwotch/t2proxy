@@ -109,12 +109,15 @@ func handleRequest(conn net.Conn) {
 				break
 			}
 		}
+		streamWait.Done()
 	}
 
 	go streamConn(remoteConn, conn)
 	go streamConn(conn, remoteConn)
 
 	streamWait.Wait()
+	conn.Close()
+	remoteConn.Close()
 
 	//io.WriteString(conn, "hello world\r\n\r\n")
 	fmt.Printf("writestring done\n")
