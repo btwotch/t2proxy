@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"reflect"
 	"sync"
 	"syscall"
@@ -81,6 +84,7 @@ func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err erro
 
 func handleRequest(conn net.Conn) {
 	var streamWait sync.WaitGroup
+	var remoteString string
 
 	ip, port, err := getOriginalDst(conn.(*net.TCPConn))
 	if err != nil {
@@ -88,7 +92,10 @@ func handleRequest(conn net.Conn) {
 	}
 
 	fmt.Printf("ip: %s port: %v\n", ip, port)
-	remoteString := fmt.Sprintf("%s:%d", ip, port)
+	//remoteString = fmt.Sprintf("%s:%d", ip, port)
+	//if port == 80 {
+	remoteString = "localhost:3128"
+	//}
 	remoteConn, err := net.Dial("tcp", remoteString)
 	if err != nil {
 		log.Fatalf("could not dial %s", remoteString)
@@ -96,8 +103,28 @@ func handleRequest(conn net.Conn) {
 
 	streamWait.Add(2)
 
-	streamConn := func(dst io.Writer, src io.Reader) {
+	streamConn := func(dst io.Writer, src io.Reader, isClient bool) {
 		fmt.Printf("streamConn\n")
+		if isClient {
+			srcReader := bufio.NewReader(src)
+			req, err := http.ReadRequest(srcReader)
+			if err != nil {
+				log.Printf("could not parse header, got: ")
+				return
+			}
+			u, _ := url.Parse("http://" + req.Host)
+			fmt.Printf("url: %v\n", req.URL.String())
+			req.URL = u
+			fmt.Printf("req: %v\n", req)
+			fmt.Printf("host: %v\n", req.Host)
+			req.WriteProxy(dst)
+			return
+		} else {
+			srcReader := bufio.NewReader(src)
+			res, _ := http.ReadResponse(srcReader, nil)
+			fmt.Printf("res: %v\n", res)
+			res.Write(dst)
+		}
 		for {
 			n, err := io.Copy(dst, src)
 			if err != nil {
@@ -105,15 +132,15 @@ func handleRequest(conn net.Conn) {
 				break
 			}
 			if n == 0 {
-				fmt.Printf("n: %d", n)
+				//fmt.Printf("n: %d", n)
 				break
 			}
 		}
 		streamWait.Done()
 	}
 
-	go streamConn(remoteConn, conn)
-	go streamConn(conn, remoteConn)
+	go streamConn(remoteConn, conn, true)
+	go streamConn(conn, remoteConn, false)
 
 	streamWait.Wait()
 	conn.Close()
@@ -127,7 +154,7 @@ func main() {
 
 	var err error
 
-	l, err := net.Listen("tcp", "127.0.0.1:3128")
+	l, err := net.Listen("tcp", "127.0.0.1:3129")
 	if err != nil {
 		log.Fatalf("could not listen: %v", err)
 	}
