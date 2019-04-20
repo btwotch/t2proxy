@@ -82,6 +82,74 @@ func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err erro
 	return
 }
 
+// handle traffic between proxy and server
+func beClient(writer io.Writer, reader io.Reader, waiter *sync.WaitGroup) {
+	srcReader := bufio.NewReader(reader)
+	res, _ := http.ReadResponse(srcReader, nil)
+	fmt.Printf("res: %v\n", res)
+	res.Write(writer)
+	for {
+		n, err := io.Copy(writer, reader)
+		if err != nil {
+			log.Printf("io.Copy failed: %v", err)
+			break
+		}
+		if n == 0 {
+			//fmt.Printf("n: %d", n)
+			break
+		}
+	}
+	waiter.Done()
+}
+
+func beServer(writer io.Writer, reader io.Reader, ip string, port uint16, waiter *sync.WaitGroup) {
+	var isHttps bool
+
+	origDst := fmt.Sprintf("%s:%d", ip, port)
+	fmt.Printf("origDst: %s\n", origDst)
+
+	isHttps = port != 80
+	if isHttps {
+		connectString := fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", origDst)
+		fmt.Printf("connectString: %s\n", connectString)
+		writer.Write([]byte(connectString))
+		srcReader := bufio.NewReader(reader)
+		req, err := http.ReadRequest(srcReader)
+		if err != nil {
+			log.Printf("could not parse header, got: ")
+			return
+		}
+		fmt.Printf("req: %v\n", req)
+	} else {
+		srcReader := bufio.NewReader(reader)
+		req, err := http.ReadRequest(srcReader)
+		if err != nil {
+			log.Printf("could not parse header, got: ")
+			return
+		}
+		fmt.Printf("req: %v\n", req)
+		u, _ := url.Parse("http://" + req.Host)
+		fmt.Printf("url: %v\n", req.URL.String())
+		req.URL = u
+		fmt.Printf("host: %v\n", req.Host)
+		req.WriteProxy(writer)
+	}
+	for {
+		n, err := io.Copy(writer, reader)
+		if err != nil {
+			log.Printf("io.Copy failed: %v", err)
+			break
+		}
+		if n == 0 {
+			//fmt.Printf("n: %d", n)
+			break
+		}
+	}
+
+	waiter.Done()
+	fmt.Println("waiter done")
+}
+
 func handleRequest(conn net.Conn) {
 	var streamWait sync.WaitGroup
 	var remoteString string
@@ -91,11 +159,7 @@ func handleRequest(conn net.Conn) {
 		log.Fatalf("getOriginalDst: %v", err)
 	}
 
-	fmt.Printf("ip: %s port: %v\n", ip, port)
-	//remoteString = fmt.Sprintf("%s:%d", ip, port)
-	//if port == 80 {
 	remoteString = "localhost:3128"
-	//}
 	remoteConn, err := net.Dial("tcp", remoteString)
 	if err != nil {
 		log.Fatalf("could not dial %s", remoteString)
@@ -103,51 +167,12 @@ func handleRequest(conn net.Conn) {
 
 	streamWait.Add(2)
 
-	streamConn := func(dst io.Writer, src io.Reader, isClient bool) {
-		fmt.Printf("streamConn\n")
-		if isClient {
-			srcReader := bufio.NewReader(src)
-			req, err := http.ReadRequest(srcReader)
-			if err != nil {
-				log.Printf("could not parse header, got: ")
-				return
-			}
-			u, _ := url.Parse("http://" + req.Host)
-			fmt.Printf("url: %v\n", req.URL.String())
-			req.URL = u
-			fmt.Printf("req: %v\n", req)
-			fmt.Printf("host: %v\n", req.Host)
-			req.WriteProxy(dst)
-			return
-		} else {
-			srcReader := bufio.NewReader(src)
-			res, _ := http.ReadResponse(srcReader, nil)
-			fmt.Printf("res: %v\n", res)
-			res.Write(dst)
-		}
-		for {
-			n, err := io.Copy(dst, src)
-			if err != nil {
-				log.Printf("io.Copy failed: %v", err)
-				break
-			}
-			if n == 0 {
-				//fmt.Printf("n: %d", n)
-				break
-			}
-		}
-		streamWait.Done()
-	}
-
-	go streamConn(remoteConn, conn, true)
-	go streamConn(conn, remoteConn, false)
+	go beServer(remoteConn, conn, ip, port, &streamWait)
+	go beClient(conn, remoteConn, &streamWait)
 
 	streamWait.Wait()
 	conn.Close()
 	remoteConn.Close()
-
-	//io.WriteString(conn, "hello world\r\n\r\n")
-	fmt.Printf("writestring done\n")
 }
 
 func main() {
