@@ -153,6 +153,8 @@ func (c *connection) beServer() {
 		fmt.Printf("url: %v\n", req.URL.String())
 		req.URL = u
 		fmt.Printf("host: %v\n", req.Host)
+		// I have no envy to rewrite subsequent headers
+		req.Header.Set("Connection", "close")
 		req.WriteProxy(writer)
 		go c.beClient()
 	}
