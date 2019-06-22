@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -63,13 +64,9 @@ func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err erro
 	// port starts at the 3rd byte and is 2 bytes long (31 144 = port 8080)
 	// IPv4 address starts at the 5th byte, 4 bytes long (206 190 36 45)
 	addr, err := syscall.GetsockoptIPv6Mreq(GetFdFromConn(clientConn), syscall.IPPROTO_IP, SO_ORIGINAL_DST)
-	fmt.Printf("getOriginalDst(): SO_ORIGINAL_DST=%+v\n", addr)
+	log.Printf("getOriginalDst(): SO_ORIGINAL_DST=%+v\n", addr)
 	if err != nil {
 		log.Printf("GETORIGINALDST|%v->?->FAILEDTOBEDETERMINED|ERR: getsocketopt(SO_ORIGINAL_DST) failed: %v", srcipport, err)
-		return
-	}
-	if err != nil {
-		log.Printf("GETORIGINALDST|%v->?->%v|ERR: could not create a FileConn fron clientConnFile=%+v: %v", srcipport, addr, clientConn, err)
 		return
 	}
 
@@ -123,39 +120,37 @@ func (c *connection) beServer() {
 	reader = c.clientConnection
 	defer c.waiter.Done()
 
-	origDst := fmt.Sprintf("%s:%d", c.ip, c.port)
-	fmt.Printf("origDst: %s\n", origDst)
-
 	isHttps = c.port != 80
 	if isHttps {
-		connectString := fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", origDst)
-		fmt.Printf("connectString: %s\n", connectString)
+		connectString := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\n\r\n", c.ip, c.port)
 		writer.Write([]byte(connectString))
 		srcReader := bufio.NewReader(c.serverConnection)
-		res, err := http.ReadResponse(srcReader, nil)
+		_, err := http.ReadResponse(srcReader, nil)
 		if err != nil {
 			c.waiter.Done()
-			log.Printf("could not parse header, got: ")
+			log.Fatalf("could not parse header, got: ")
 			return
 		}
-		fmt.Printf("res: %v\n", res)
 		go c.beClient()
 	} else {
 		srcReader := bufio.NewReader(reader)
 		req, err := http.ReadRequest(srcReader)
 		if err != nil {
 			c.waiter.Done()
-			log.Printf("could not parse header, got: ")
+			log.Fatalf("could not parse header, got: ")
 			return
 		}
-		fmt.Printf("req: %v\n", req)
-		u, _ := url.Parse("http://" + req.Host)
-		fmt.Printf("url: %v\n", req.URL.String())
+		log.Printf("req: %v\n", req)
+		if req.Host == "" {
+			log.Fatalf("host empty")
+		}
+		u, _ := url.Parse("http://" + strings.Trim(req.Host, "/\\: ") + "/" + strings.Trim(req.URL.String(), "/"))
 		req.URL = u
-		fmt.Printf("host: %v\n", req.Host)
+		log.Printf("host: %v\n", req.Host)
 		// I have no envy to rewrite subsequent headers
 		req.Header.Set("Connection", "close")
 		req.WriteProxy(writer)
+
 		go c.beClient()
 	}
 	for {
