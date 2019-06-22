@@ -80,8 +80,9 @@ func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err erro
 }
 
 type connection struct {
-	serverConnection io.ReadWriter
-	clientConnection io.ReadWriter
+	serverConnection io.ReadWriteCloser
+	clientConnection io.ReadWriteCloser
+	clientBody       io.ReadCloser
 	waiter           *sync.WaitGroup
 	waiterMutex      sync.Mutex
 	ip               string
@@ -90,11 +91,18 @@ type connection struct {
 
 // handle traffic between proxy and server
 func (c *connection) beClient() {
-	var writer io.Writer
-	var reader io.Reader
+	var writer io.WriteCloser
+	var reader io.ReadCloser
 
 	writer = c.clientConnection
 	reader = c.serverConnection
+	/*
+		if c.clientBody != nil {
+			reader = c.clientBody
+		} else {
+			reader = c.serverConnection
+		}
+	*/
 
 	defer c.waiter.Done()
 	for {
@@ -107,14 +115,17 @@ func (c *connection) beClient() {
 			break
 		}
 	}
+
+	writer.Close()
+	reader.Close()
 }
 
 // handle traffic between proxy and client
 func (c *connection) beServer() {
 	var isHttps bool
 
-	var writer io.Writer
-	var reader io.Reader
+	var writer io.WriteCloser
+	var reader io.ReadCloser
 
 	writer = c.serverConnection
 	reader = c.clientConnection
@@ -140,6 +151,7 @@ func (c *connection) beServer() {
 			log.Fatalf("could not parse header, got: ")
 			return
 		}
+		c.clientBody = req.Body
 		log.Printf("req: %v\n", req)
 		if req.Host == "" {
 			log.Fatalf("host empty")
@@ -162,6 +174,8 @@ func (c *connection) beServer() {
 		if n == 0 {
 			break
 		}
+		writer.Close()
+		reader.Close()
 	}
 
 }
