@@ -160,6 +160,16 @@ func (c *connection) beServer() {
 		req.Header.Set("Connection", "close")
 		req.WriteProxy(writer)
 
+		serverSrcReader := bufio.NewReader(c.serverConnection)
+		resp, err := http.ReadResponse(serverSrcReader, nil)
+		if err != nil {
+			c.waiter.Done()
+			log.Fatalf("could not parse response header, got: %v", err)
+			return
+		}
+		fmt.Printf(">>>>>>>>> status code: %d\n", resp.StatusCode)
+		resp.Write(c.clientConnection)
+
 		go c.beClient()
 	}
 	for {
