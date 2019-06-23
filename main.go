@@ -96,13 +96,6 @@ func (c *connection) beClient() {
 
 	writer = c.clientConnection
 	reader = c.serverConnection
-	/*
-		if c.clientBody != nil {
-			reader = c.clientBody
-		} else {
-			reader = c.serverConnection
-		}
-	*/
 
 	defer c.waiter.Done()
 	for {
@@ -131,24 +124,28 @@ func (c *connection) beServer() {
 	reader = c.clientConnection
 	defer c.waiter.Done()
 
+	defer writer.Close()
+	defer reader.Close()
+
 	isHttps = c.port != 80
 	if isHttps {
 		connectString := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\n\r\n", c.ip, c.port)
 		writer.Write([]byte(connectString))
 		srcReader := bufio.NewReader(c.serverConnection)
-		_, err := http.ReadResponse(srcReader, nil)
+		resp, err := http.ReadResponse(srcReader, nil)
 		if err != nil {
 			c.waiter.Done()
-			log.Fatalf("could not parse header, got: ")
+			log.Fatalf("(CONNECT) could not parse header, got: %v", err)
 			return
 		}
+		fmt.Printf("(SSL) status code: %d\n", resp.StatusCode)
 		go c.beClient()
 	} else {
 		srcReader := bufio.NewReader(reader)
 		req, err := http.ReadRequest(srcReader)
 		if err != nil {
 			c.waiter.Done()
-			log.Fatalf("could not parse header, got: ")
+			log.Fatalf("could not parse request header, got: %v", err)
 			return
 		}
 		c.clientBody = req.Body
@@ -174,8 +171,6 @@ func (c *connection) beServer() {
 		if n == 0 {
 			break
 		}
-		writer.Close()
-		reader.Close()
 	}
 
 }
