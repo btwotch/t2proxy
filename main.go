@@ -113,6 +113,67 @@ func (c *connection) beClient() {
 	reader.Close()
 }
 
+func (c *connection) beServerHttpConnect() {
+	var writer io.WriteCloser
+
+	writer = c.serverConnection
+
+	connectString := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\n\r\n", c.ip, c.port)
+	writer.Write([]byte(connectString))
+	srcReader := bufio.NewReader(c.serverConnection)
+	resp, err := http.ReadResponse(srcReader, nil)
+	if err != nil {
+		c.waiter.Done()
+		log.Fatalf("(CONNECT) could not parse header, got: %v", err)
+		return
+	}
+	fmt.Printf("(SSL) status code: %d\n", resp.StatusCode)
+	go c.beClient()
+
+}
+
+func (c *connection) beServerHttp() {
+	var writer io.WriteCloser
+	var reader io.ReadCloser
+
+	writer = c.serverConnection
+	reader = c.clientConnection
+
+	srcReader := bufio.NewReader(reader)
+	req, err := http.ReadRequest(srcReader)
+	if err != nil {
+		c.waiter.Done()
+		log.Printf("could not parse request header, got: %v", err)
+		return
+	}
+	c.clientBody = req.Body
+	log.Printf("req: %v\n", req)
+	if req.Host == "" {
+		log.Fatalf("host empty")
+	}
+	u, _ := url.Parse("http://" + strings.Trim(req.Host, "/\\: ") + "/" + strings.Trim(req.URL.String(), "/"))
+	req.URL = u
+	log.Printf("host: %v\n", req.Host)
+	// I have no envy to rewrite subsequent headers
+	req.Header.Set("Connection", "close")
+	req.WriteProxy(writer)
+
+	serverSrcReader := bufio.NewReader(c.serverConnection)
+	resp, err := http.ReadResponse(serverSrcReader, nil)
+	if err != nil {
+		c.waiter.Done()
+		log.Printf("could not parse response header, got: %v", err)
+		return
+	}
+	fmt.Printf(">>>>>>>>> status code: %d\n", resp.StatusCode)
+	resp.Write(c.clientConnection)
+
+	go c.beClient()
+}
+
+func (c *connection) beServerHttp() {
+}
+
 // handle traffic between proxy and client
 func (c *connection) beServer() {
 	var isHttps bool
@@ -129,48 +190,9 @@ func (c *connection) beServer() {
 
 	isHttps = c.port != 80
 	if isHttps {
-		connectString := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\n\r\n", c.ip, c.port)
-		writer.Write([]byte(connectString))
-		srcReader := bufio.NewReader(c.serverConnection)
-		resp, err := http.ReadResponse(srcReader, nil)
-		if err != nil {
-			c.waiter.Done()
-			log.Fatalf("(CONNECT) could not parse header, got: %v", err)
-			return
-		}
-		fmt.Printf("(SSL) status code: %d\n", resp.StatusCode)
-		go c.beClient()
+		c.beServerHttpConnect()
 	} else {
-		srcReader := bufio.NewReader(reader)
-		req, err := http.ReadRequest(srcReader)
-		if err != nil {
-			c.waiter.Done()
-			log.Fatalf("could not parse request header, got: %v", err)
-			return
-		}
-		c.clientBody = req.Body
-		log.Printf("req: %v\n", req)
-		if req.Host == "" {
-			log.Fatalf("host empty")
-		}
-		u, _ := url.Parse("http://" + strings.Trim(req.Host, "/\\: ") + "/" + strings.Trim(req.URL.String(), "/"))
-		req.URL = u
-		log.Printf("host: %v\n", req.Host)
-		// I have no envy to rewrite subsequent headers
-		req.Header.Set("Connection", "close")
-		req.WriteProxy(writer)
-
-		serverSrcReader := bufio.NewReader(c.serverConnection)
-		resp, err := http.ReadResponse(serverSrcReader, nil)
-		if err != nil {
-			c.waiter.Done()
-			log.Fatalf("could not parse response header, got: %v", err)
-			return
-		}
-		fmt.Printf(">>>>>>>>> status code: %d\n", resp.StatusCode)
-		resp.Write(c.clientConnection)
-
-		go c.beClient()
+		c.beServerHttp()
 	}
 	for {
 		n, err := io.Copy(writer, reader)
