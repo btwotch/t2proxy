@@ -151,9 +151,10 @@ func (c *connection) beServerHttp() {
 	if req.Host == "" {
 		log.Fatalf("host empty")
 	}
-	u, _ := url.Parse("http://" + strings.Trim(req.Host, "/\\: ") + "/" + strings.Trim(req.URL.String(), "/"))
+	log.Printf("origin url string: %s\n", req.URL.String())
+	u, _ := url.Parse("http://" + strings.Trim(req.Host, "/\\: ") + "/" + strings.TrimLeft(req.URL.String(), "/"))
 	req.URL = u
-	log.Printf("host: %v\n", req.Host)
+	log.Printf("host: %v url: %v\n", req.Host, u.String())
 	// I have no envy to rewrite subsequent headers
 	req.Header.Set("Connection", "close")
 	req.WriteProxy(writer)
