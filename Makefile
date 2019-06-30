@@ -1,4 +1,6 @@
-.PHONY: clean mrproper docker-build
+.PHONY: clean mrproper docker-build all backend
+
+all: backend classes.png
 
 backend: *.go
 	goimports -l -w .
@@ -9,7 +11,7 @@ backend: *.go
 	go build -race
 
 clean:
-	rm -fv t2proxy
+	rm -fv t2proxy classes.png
 
 mrproper: clean
 
@@ -18,3 +20,6 @@ docker-build: Dockerfile testclient/Dockerfile docker-compose.yml
 
 docker: docker-build
 	docker-compose up
+
+classes.png: classes.uml
+	plantuml classes.uml
