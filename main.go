@@ -79,7 +79,7 @@ func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err erro
 	return
 }
 
-type connection struct {
+type connectionHttpProxyBase struct {
 	serverConnection io.ReadWriteCloser
 	clientConnection io.ReadWriteCloser
 	clientBody       io.ReadCloser
@@ -89,13 +89,79 @@ type connection struct {
 	port             uint16
 }
 
+type connectionHandler interface {
+	handleConnection() bool
+	setServerConnection(serverConnection io.ReadWriteCloser)
+	getServerConnection() io.ReadWriteCloser
+	setClientConnection(serverConnection io.ReadWriteCloser)
+	getClientConnection() io.ReadWriteCloser
+	setIp(ip string)
+	getIp() string
+	setPort(port uint16)
+	getPort() uint16
+	setWaiter(waiter *sync.WaitGroup)
+	getWaiter() *sync.WaitGroup
+}
+
+type connectionHttp struct {
+	connectionHttpProxyBase
+}
+type connectionHttps struct {
+	connectionHttpProxyBase
+}
+
+// TODO: delme
+type connection struct {
+	connectionHttpProxyBase
+}
+
+func (c *connectionHttpProxyBase) getIp() string {
+	return c.ip
+}
+
+func (c *connectionHttpProxyBase) getPort() uint16 {
+	return c.port
+}
+
+func (c *connectionHttpProxyBase) setServerConnection(serverConnection io.ReadWriteCloser) {
+	c.serverConnection = serverConnection
+}
+
+func (c *connectionHttpProxyBase) setClientConnection(clientConnection io.ReadWriteCloser) {
+	c.clientConnection = clientConnection
+}
+
+func (c *connectionHttpProxyBase) getClientConnection() io.ReadWriteCloser {
+	return c.clientConnection
+}
+
+func (c *connectionHttpProxyBase) getServerConnection() io.ReadWriteCloser {
+	return c.serverConnection
+}
+
+func (c *connectionHttpProxyBase) setIp(ip string) {
+	c.ip = ip
+}
+
+func (c *connectionHttpProxyBase) setPort(port uint16) {
+	c.port = port
+}
+
+func (c *connectionHttpProxyBase) setWaiter(waiter *sync.WaitGroup) {
+	c.waiter = waiter
+}
+
+func (c *connectionHttpProxyBase) getWaiter() *sync.WaitGroup {
+	return c.waiter
+}
+
 // handle traffic between proxy and server
-func (c *connection) beClient() {
+func (c *connectionHttpProxyBase) beClient() {
 	var writer io.WriteCloser
 	var reader io.ReadCloser
 
-	writer = c.clientConnection
-	reader = c.serverConnection
+	writer = c.getClientConnection()
+	reader = c.getServerConnection()
 
 	defer c.waiter.Done()
 	for {
@@ -113,7 +179,7 @@ func (c *connection) beClient() {
 	reader.Close()
 }
 
-func (c *connection) beServerHttpConnect() {
+func (c *connectionHttps) handleConnection() bool {
 	var writer io.WriteCloser
 
 	writer = c.serverConnection
@@ -125,14 +191,15 @@ func (c *connection) beServerHttpConnect() {
 	if err != nil {
 		c.waiter.Done()
 		log.Fatalf("(CONNECT) could not parse header, got: %v", err)
-		return
+		return false
 	}
 	fmt.Printf("(SSL) status code: %d\n", resp.StatusCode)
 	go c.beClient()
 
+	return true
 }
 
-func (c *connection) beServerHttp() {
+func (c *connectionHttp) handleConnection() bool {
 	var writer io.WriteCloser
 	var reader io.ReadCloser
 
@@ -144,7 +211,7 @@ func (c *connection) beServerHttp() {
 	if err != nil {
 		c.waiter.Done()
 		log.Printf("could not parse request header, got: %v", err)
-		return
+		return false
 	}
 	c.clientBody = req.Body
 	log.Printf("req: %v\n", req)
@@ -164,37 +231,32 @@ func (c *connection) beServerHttp() {
 	if err != nil {
 		c.waiter.Done()
 		log.Printf("could not parse response header, got: %v", err)
-		return
+		return false
 	}
+	fmt.Printf("> resp: %v\n", resp)
 	fmt.Printf(">>>>>>>>> status code: %d\n", resp.StatusCode)
 	resp.Write(c.clientConnection)
 
 	go c.beClient()
-}
 
-func (c *connection) beServerHttp() {
+	return true
 }
 
 // handle traffic between proxy and client
-func (c *connection) beServer() {
-	var isHttps bool
+func beServer(c connectionHandler) {
 
 	var writer io.WriteCloser
 	var reader io.ReadCloser
 
-	writer = c.serverConnection
-	reader = c.clientConnection
-	defer c.waiter.Done()
+	writer = c.getServerConnection()
+	reader = c.getClientConnection()
+	defer c.getWaiter().Done()
 
 	defer writer.Close()
 	defer reader.Close()
 
-	isHttps = c.port != 80
-	if isHttps {
-		c.beServerHttpConnect()
-	} else {
-		c.beServerHttp()
-	}
+	c.handleConnection()
+
 	for {
 		n, err := io.Copy(writer, reader)
 		if err != nil {
@@ -209,9 +271,10 @@ func (c *connection) beServer() {
 }
 
 func handleRequest(conn net.Conn) {
+	var isHttps bool
 	var waiter sync.WaitGroup
 	var remoteString string
-	var c connection
+	var c connectionHandler
 
 	ip, port, err := getOriginalDst(conn.(*net.TCPConn))
 	if err != nil {
@@ -224,14 +287,20 @@ func handleRequest(conn net.Conn) {
 		log.Fatalf("could not dial %s", remoteString)
 	}
 
-	c.serverConnection = remoteConn
-	c.clientConnection = conn
-	c.ip = ip
-	c.port = port
-	c.waiter = &waiter
+	isHttps = port != 80
+	if isHttps {
+		c = &connectionHttps{}
+	} else {
+		c = &connectionHttp{}
+	}
+	c.setServerConnection(remoteConn)
+	c.setClientConnection(conn)
+	c.setIp(ip)
+	c.setPort(port)
+	c.setWaiter(&waiter)
 
 	waiter.Add(2)
-	go c.beServer()
+	go beServer(c)
 	//go c.beClient()
 
 	waiter.Wait()
