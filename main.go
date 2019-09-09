@@ -110,9 +110,7 @@ type connectionHttp struct {
 type connectionHttps struct {
 	connectionHttpProxyBase
 }
-
-// TODO: delme
-type connection struct {
+type connectionDirect struct {
 	connectionHttpProxyBase
 }
 
@@ -193,10 +191,27 @@ func (c *connectionHttps) handleConnection() bool {
 	resp, err := http.ReadResponse(srcReader, nil)
 	if err != nil {
 		c.waiter.Done()
-		log.Fatalf("(CONNECT) could not parse header, got: %v", err)
+		log.Printf("(CONNECT) could not parse header, got: %v", err)
 		return false
 	}
 	fmt.Printf("(SSL) status code: %d\n", resp.StatusCode)
+	go c.beClient()
+
+	return true
+}
+
+func (c *connectionDirect) handleConnection() bool {
+	remoteString := fmt.Sprintf("%s:%d", c.ip, c.port)
+	log.Printf("direct remote string: %s", remoteString)
+
+	remoteConn, err := net.Dial("tcp", remoteString)
+	if err != nil {
+		log.Printf("could not dial %s", remoteString)
+		return false
+	}
+
+	c.setServerConnection(remoteConn)
+
 	go c.beClient()
 
 	return true
@@ -221,7 +236,8 @@ func (c *connectionHttp) handleConnection() bool {
 	c.clientBody = req.Body
 	log.Printf("req: %v\n", req)
 	if req.Host == "" {
-		log.Fatalf("host empty")
+		log.Printf("host empty")
+		return false
 	}
 	log.Printf("origin url string: %s\n", req.URL.String())
 	u, _ := url.Parse("http://" + strings.Trim(req.Host, "/\\: ") + "/" + strings.TrimLeft(req.URL.String(), "/"))
@@ -248,18 +264,19 @@ func (c *connectionHttp) handleConnection() bool {
 }
 
 // handle traffic between proxy and client
-func beServer(c connectionHandler) {
+func beServer(c connectionHandler) bool {
 
 	var writer io.WriteCloser
 	var reader io.ReadCloser
 
-	c.handleConnection()
+	defer c.getWaiter().Done()
+	defer c.shutDown()
+	if !c.handleConnection() {
+		return false
+	}
 
 	writer = c.getServerConnection()
 	reader = c.getClientConnection()
-	defer c.getWaiter().Done()
-
-	defer c.shutDown()
 
 	for {
 		n, err := io.Copy(writer, reader)
@@ -272,11 +289,16 @@ func beServer(c connectionHandler) {
 		}
 	}
 
+	return true
 }
 
 func (c *connectionHttpProxyBase) shutDown() {
-	c.getServerConnection().Close()
-	c.getClientConnection().Close()
+	if c.getServerConnection() != nil {
+		c.getServerConnection().Close()
+	}
+	if c.getClientConnection() != nil {
+		c.getClientConnection().Close()
+	}
 }
 
 func (c *connectionHttpProxyBase) connectToProxy() {
@@ -290,7 +312,6 @@ func (c *connectionHttpProxyBase) connectToProxy() {
 }
 
 func handleRequest(conn net.Conn) {
-	var isHttps bool
 	var waiter sync.WaitGroup
 	var c connectionHandler
 
@@ -299,22 +320,28 @@ func handleRequest(conn net.Conn) {
 		log.Fatalf("getOriginalDst: %v", err)
 	}
 
-	isHttps = port != 80
-	if isHttps {
+	if port == 443 {
 		log.Printf("Connection is https")
 		c = &connectionHttps{}
-	} else {
+	} else if port == 80 {
 		log.Printf("Connection is http")
 		c = &connectionHttp{}
+	} else {
+		log.Printf("Connection is direct")
+		c = &connectionDirect{}
 	}
+
 	c.setClientConnection(conn)
 	c.setIp(ip)
 	c.setPort(port)
 	c.setWaiter(&waiter)
 
 	waiter.Add(2)
-	go beServer(c)
-	//go c.beClient()
+	beServerRet := make(chan bool)
+	go func() {
+		beServerRet <- beServer(c)
+	}()
+	fmt.Printf("beServerRet: %v\n", <-beServerRet)
 
 	waiter.Wait()
 	c.shutDown()
