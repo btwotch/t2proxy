@@ -91,6 +91,7 @@ type connectionHttpProxyBase struct {
 
 type connectionHandler interface {
 	handleConnection() bool
+	shutDown()
 	setServerConnection(serverConnection io.ReadWriteCloser)
 	getServerConnection() io.ReadWriteCloser
 	setClientConnection(serverConnection io.ReadWriteCloser)
@@ -182,6 +183,8 @@ func (c *connectionHttpProxyBase) beClient() {
 func (c *connectionHttps) handleConnection() bool {
 	var writer io.WriteCloser
 
+	c.connectToProxy()
+
 	writer = c.serverConnection
 
 	connectString := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\n\r\n", c.ip, c.port)
@@ -202,6 +205,8 @@ func (c *connectionHttps) handleConnection() bool {
 func (c *connectionHttp) handleConnection() bool {
 	var writer io.WriteCloser
 	var reader io.ReadCloser
+
+	c.connectToProxy()
 
 	writer = c.serverConnection
 	reader = c.clientConnection
@@ -248,14 +253,13 @@ func beServer(c connectionHandler) {
 	var writer io.WriteCloser
 	var reader io.ReadCloser
 
+	c.handleConnection()
+
 	writer = c.getServerConnection()
 	reader = c.getClientConnection()
 	defer c.getWaiter().Done()
 
-	defer writer.Close()
-	defer reader.Close()
-
-	c.handleConnection()
+	defer c.shutDown()
 
 	for {
 		n, err := io.Copy(writer, reader)
@@ -270,10 +274,24 @@ func beServer(c connectionHandler) {
 
 }
 
+func (c *connectionHttpProxyBase) shutDown() {
+	c.getServerConnection().Close()
+	c.getClientConnection().Close()
+}
+
+func (c *connectionHttpProxyBase) connectToProxy() {
+	remoteString := "localhost:3128"
+	remoteConn, err := net.Dial("tcp", remoteString)
+	if err != nil {
+		log.Fatalf("could not dial %s", remoteString)
+	}
+
+	c.setServerConnection(remoteConn)
+}
+
 func handleRequest(conn net.Conn) {
 	var isHttps bool
 	var waiter sync.WaitGroup
-	var remoteString string
 	var c connectionHandler
 
 	ip, port, err := getOriginalDst(conn.(*net.TCPConn))
@@ -281,19 +299,14 @@ func handleRequest(conn net.Conn) {
 		log.Fatalf("getOriginalDst: %v", err)
 	}
 
-	remoteString = "localhost:3128"
-	remoteConn, err := net.Dial("tcp", remoteString)
-	if err != nil {
-		log.Fatalf("could not dial %s", remoteString)
-	}
-
 	isHttps = port != 80
 	if isHttps {
+		log.Printf("Connection is https")
 		c = &connectionHttps{}
 	} else {
+		log.Printf("Connection is http")
 		c = &connectionHttp{}
 	}
-	c.setServerConnection(remoteConn)
 	c.setClientConnection(conn)
 	c.setIp(ip)
 	c.setPort(port)
@@ -304,8 +317,7 @@ func handleRequest(conn net.Conn) {
 	//go c.beClient()
 
 	waiter.Wait()
-	conn.Close()
-	remoteConn.Close()
+	c.shutDown()
 }
 
 func main() {
