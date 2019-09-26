@@ -23,3 +23,8 @@ docker: docker-build
 
 classes.png: classes.uml
 	plantuml classes.uml
+
+ntlm: ntlm.go
+	goimports -l -w ntlm.go
+	go fmt
+	go run ntlm.go
