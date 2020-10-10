@@ -1,6 +1,6 @@
 .PHONY: clean mrproper docker-build all backend
 
-all: backend classes.png
+all: backend
 
 backend: *.go
 	goimports -l -w .
@@ -11,7 +11,7 @@ backend: *.go
 	go build -race
 
 clean:
-	rm -fv t2proxy classes.png
+	rm -fv t2proxy
 
 mrproper: clean
 
@@ -19,7 +19,5 @@ docker-build: Dockerfile testclient/Dockerfile docker-compose.yml
 	docker-compose build
 
 docker: docker-build
-	docker-compose up
-
-classes.png: classes.uml
-	plantuml classes.uml
+	docker build -t t2 --build-arg USER_ID=$(shell id -u) --build-arg GROUP_ID=$(shell id -g) .
+	docker run --privileged -v $(shell pwd):/t2proxy -it t2

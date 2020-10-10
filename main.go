@@ -1,18 +1,15 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"net/http"
-	"net/url"
 	"reflect"
-	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const SO_ORIGINAL_DST = 80
@@ -33,7 +30,7 @@ func itod(i uint) string {
 	return string(b[bp:])
 }
 
-func GetFdFromConn(l net.Conn) int {
+func getFdFromConn(l net.Conn) int {
 	v := reflect.ValueOf(l)
 	netFD := reflect.Indirect(reflect.Indirect(v).FieldByName("fd"))
 	pfd := reflect.Indirect(netFD.FieldByName("pfd"))
@@ -63,7 +60,7 @@ func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err erro
 	// Example result: &{Multiaddr:[2 0 31 144 206 190 36 45 0 0 0 0 0 0 0 0] Interface:0}
 	// port starts at the 3rd byte and is 2 bytes long (31 144 = port 8080)
 	// IPv4 address starts at the 5th byte, 4 bytes long (206 190 36 45)
-	addr, err := syscall.GetsockoptIPv6Mreq(GetFdFromConn(clientConn), syscall.IPPROTO_IP, SO_ORIGINAL_DST)
+	addr, err := syscall.GetsockoptIPv6Mreq(getFdFromConn(clientConn), syscall.IPPROTO_IP, SO_ORIGINAL_DST)
 	log.Printf("getOriginalDst(): SO_ORIGINAL_DST=%+v\n", addr)
 	if err != nil {
 		log.Printf("GETORIGINALDST|%v->?->FAILEDTOBEDETERMINED|ERR: getsocketopt(SO_ORIGINAL_DST) failed: %v", srcipport, err)
@@ -79,272 +76,129 @@ func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err erro
 	return
 }
 
-type connectionHttpProxyBase struct {
-	serverConnection io.ReadWriteCloser
-	clientConnection io.ReadWriteCloser
-	clientBody       io.ReadCloser
-	waiter           *sync.WaitGroup
-	waiterMutex      sync.Mutex
-	ip               string
-	port             uint16
-}
+func transfer(to, from net.Conn, wg *sync.WaitGroup) {
+	log.Printf("transfer: %v (%v) -> %v (%v)\n", from, from.RemoteAddr(), to, to.RemoteAddr())
 
-type connectionHandler interface {
-	handleConnection() bool
-	shutDown()
-	setServerConnection(serverConnection io.ReadWriteCloser)
-	getServerConnection() io.ReadWriteCloser
-	setClientConnection(serverConnection io.ReadWriteCloser)
-	getClientConnection() io.ReadWriteCloser
-	setIp(ip string)
-	getIp() string
-	setPort(port uint16)
-	getPort() uint16
-	setWaiter(waiter *sync.WaitGroup)
-	getWaiter() *sync.WaitGroup
-}
-
-type connectionHttp struct {
-	connectionHttpProxyBase
-}
-type connectionHttps struct {
-	connectionHttpProxyBase
-}
-type connectionDirect struct {
-	connectionHttpProxyBase
-}
-
-func (c *connectionHttpProxyBase) getIp() string {
-	return c.ip
-}
-
-func (c *connectionHttpProxyBase) getPort() uint16 {
-	return c.port
-}
-
-func (c *connectionHttpProxyBase) setServerConnection(serverConnection io.ReadWriteCloser) {
-	c.serverConnection = serverConnection
-}
-
-func (c *connectionHttpProxyBase) setClientConnection(clientConnection io.ReadWriteCloser) {
-	c.clientConnection = clientConnection
-}
-
-func (c *connectionHttpProxyBase) getClientConnection() io.ReadWriteCloser {
-	return c.clientConnection
-}
-
-func (c *connectionHttpProxyBase) getServerConnection() io.ReadWriteCloser {
-	return c.serverConnection
-}
-
-func (c *connectionHttpProxyBase) setIp(ip string) {
-	c.ip = ip
-}
-
-func (c *connectionHttpProxyBase) setPort(port uint16) {
-	c.port = port
-}
-
-func (c *connectionHttpProxyBase) setWaiter(waiter *sync.WaitGroup) {
-	c.waiter = waiter
-}
-
-func (c *connectionHttpProxyBase) getWaiter() *sync.WaitGroup {
-	return c.waiter
-}
-
-// handle traffic between proxy and server
-func (c *connectionHttpProxyBase) beClient() {
-	var writer io.WriteCloser
-	var reader io.ReadCloser
-
-	writer = c.getClientConnection()
-	reader = c.getServerConnection()
-
-	defer c.waiter.Done()
+	defer wg.Done()
 	for {
-		n, err := io.Copy(writer, reader)
+		n, err := io.Copy(to, from)
+		if err == io.EOF || n == 0 {
+			break
+		}
 		if err != nil {
 			log.Printf("io.Copy failed: %v", err)
-			break
-		}
-		if n == 0 {
-			break
+			//break
+			continue
 		}
 	}
 
-	writer.Close()
-	reader.Close()
+	log.Printf("transfer done: %v (%v) -> %v (%v)\n", from, from.RemoteAddr(), to, to.RemoteAddr())
 }
 
-func (c *connectionHttps) handleConnection() bool {
-	var writer io.WriteCloser
+// copy from one socket to another manually
+func transferDebug(to, from net.Conn, wg *sync.WaitGroup) {
+	log.Printf("transfer: %v (%v) -> %v (%v)\n", from, from.RemoteAddr(), to, to.RemoteAddr())
 
-	c.connectToProxy()
-
-	writer = c.serverConnection
-
-	connectString := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\n\r\n", c.ip, c.port)
-	writer.Write([]byte(connectString))
-	srcReader := bufio.NewReader(c.serverConnection)
-	resp, err := http.ReadResponse(srcReader, nil)
-	if err != nil {
-		c.waiter.Done()
-		log.Printf("(CONNECT) could not parse header, got: %v", err)
-		return false
-	}
-	fmt.Printf("(SSL) status code: %d\n", resp.StatusCode)
-	go c.beClient()
-
-	return true
-}
-
-func (c *connectionDirect) handleConnection() bool {
-	remoteString := fmt.Sprintf("%s:%d", c.ip, c.port)
-	log.Printf("direct remote string: %s", remoteString)
-
-	remoteConn, err := net.Dial("tcp", remoteString)
-	if err != nil {
-		log.Printf("could not dial %s", remoteString)
-		return false
-	}
-
-	c.setServerConnection(remoteConn)
-
-	go c.beClient()
-
-	return true
-}
-
-func (c *connectionHttp) handleConnection() bool {
-	var writer io.WriteCloser
-	var reader io.ReadCloser
-
-	c.connectToProxy()
-
-	writer = c.serverConnection
-	reader = c.clientConnection
-
-	srcReader := bufio.NewReader(reader)
-	req, err := http.ReadRequest(srcReader)
-	if err != nil {
-		c.waiter.Done()
-		log.Printf("could not parse request header, got: %v", err)
-		return false
-	}
-	c.clientBody = req.Body
-	log.Printf("req: %v\n", req)
-	if req.Host == "" {
-		log.Printf("host empty")
-		return false
-	}
-	log.Printf("origin url string: %s\n", req.URL.String())
-	u, _ := url.Parse("http://" + strings.Trim(req.Host, "/\\: ") + "/" + strings.TrimLeft(req.URL.String(), "/"))
-	req.URL = u
-	log.Printf("host: %v url: %v\n", req.Host, u.String())
-	// I have no envy to rewrite subsequent headers
-	req.Header.Set("Connection", "close")
-	req.WriteProxy(writer)
-
-	serverSrcReader := bufio.NewReader(c.serverConnection)
-	resp, err := http.ReadResponse(serverSrcReader, nil)
-	if err != nil {
-		c.waiter.Done()
-		log.Printf("could not parse response header, got: %v", err)
-		return false
-	}
-	fmt.Printf("> resp: %v\n", resp)
-	fmt.Printf(">>>>>>>>> status code: %d\n", resp.StatusCode)
-	resp.Write(c.clientConnection)
-
-	go c.beClient()
-
-	return true
-}
-
-// handle traffic between proxy and client
-func beServer(c connectionHandler) bool {
-
-	var writer io.WriteCloser
-	var reader io.ReadCloser
-
-	defer c.getWaiter().Done()
-	defer c.shutDown()
-	if !c.handleConnection() {
-		return false
-	}
-
-	writer = c.getServerConnection()
-	reader = c.getClientConnection()
-
+	defer wg.Done()
 	for {
-		n, err := io.Copy(writer, reader)
-		if err != nil {
-			log.Printf("io.Copy failed: %v", err)
-			break
-		}
-		if n == 0 {
-			break
-		}
-	}
+		var buf []byte
 
-	return true
+		buf = make([]byte, 256)
+		bytesRead, err := from.Read(buf)
+		if err == io.EOF || bytesRead == 0 {
+			log.Printf("end of reader: %d %v", bytesRead, err)
+			break
+		} else if err != nil {
+			log.Fatalf("could not read: %v", err)
+		}
+
+		fmt.Printf("%+v\n", buf[:bytesRead])
+
+		bytesWritten := 0
+
+		for bytesWritten < bytesRead {
+			fmt.Printf("writing %d bytes\n", bytesRead)
+			n, err := to.Write(buf[:(bytesRead - bytesWritten)])
+			fmt.Printf("written %d bytes\n", n)
+			if err == io.EOF || n == 0 {
+				log.Printf("end of reader: %d (%d) %v", bytesWritten, n, err)
+				break
+			} else if err != nil {
+				log.Fatalf("could not read: %v", err)
+			}
+			bytesWritten += n
+		}
+		fmt.Printf("all written ...\n")
+
+	}
 }
 
-func (c *connectionHttpProxyBase) shutDown() {
-	if c.getServerConnection() != nil {
-		c.getServerConnection().Close()
+func dialOnDevice(ip string, port uint16, device string) net.Conn {
+	dialer := &net.Dialer{
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				log.Printf("network: %s address: %s dest: %s:%d dev: %s\n", network, address, ip, port, device)
+				err := syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, device)
+				if err != nil {
+					log.Printf("set sockopt failed (%s:%d dev: %s): %v", ip, port, device, err)
+				}
+			})
+		},
+		Timeout: 5 * time.Second,
 	}
-	if c.getClientConnection() != nil {
-		c.getClientConnection().Close()
-	}
-}
 
-func (c *connectionHttpProxyBase) connectToProxy() {
-	remoteString := "localhost:3128"
-	remoteConn, err := net.Dial("tcp", remoteString)
+	log.Printf("dialing %s:%d dev: %s", ip, port, device)
+	c, err := dialer.Dial("tcp", fmt.Sprintf("%s:%d", ip, port))
 	if err != nil {
-		log.Fatalf("could not dial %s", remoteString)
+		log.Printf("could not dial %s:%d: %v", ip, port, err)
 	}
 
-	c.setServerConnection(remoteConn)
+	return c
+}
+
+func dial(ip string, port uint16) net.Conn {
+	//devices := []string{"enp0s31f6", "wlp3s0", "tap0"}
+	devices := []string{"lo", "tap0"}
+
+	var conn net.Conn
+
+	for _, dev := range devices {
+		// TODO: parallelize and cancel
+		conn = dialOnDevice(ip, port, dev)
+		if conn != nil {
+			return conn
+		}
+	}
+
+	return conn
 }
 
 func handleRequest(conn net.Conn) {
-	var waiter sync.WaitGroup
-	var c connectionHandler
+	var wg sync.WaitGroup
 
 	ip, port, err := getOriginalDst(conn.(*net.TCPConn))
 	if err != nil {
 		log.Fatalf("getOriginalDst: %v", err)
 	}
 
-	if port == 443 {
-		log.Printf("Connection is https")
-		c = &connectionHttps{}
-	} else if port == 80 {
-		log.Printf("Connection is http")
-		c = &connectionHttp{}
-	} else {
-		log.Printf("Connection is direct")
-		c = &connectionDirect{}
+	serverConn := dial(ip, port)
+
+	if serverConn == nil {
+		log.Printf("Calling %s:%d unsuccessful", ip, port)
+		return
 	}
 
-	c.setClientConnection(conn)
-	c.setIp(ip)
-	c.setPort(port)
-	c.setWaiter(&waiter)
+	log.Printf("Calling %s:%d successful", ip, port)
 
-	waiter.Add(2)
-	beServerRet := make(chan bool)
-	go func() {
-		beServerRet <- beServer(c)
-	}()
-	fmt.Printf("beServerRet: %v\n", <-beServerRet)
+	wg.Add(2)
 
-	waiter.Wait()
-	c.shutDown()
+	go transfer(conn, serverConn, &wg)
+	go transfer(serverConn, conn, &wg)
+
+	wg.Wait()
+
+	conn.Close()
+	serverConn.Close()
 }
 
 func main() {
@@ -364,6 +218,6 @@ func main() {
 			log.Fatalf("accept: %v", err)
 		}
 
-		go handleRequest(conn)
+		handleRequest(conn)
 	}
 }
