@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -80,14 +81,16 @@ func transfer(to, from net.Conn, wg *sync.WaitGroup) {
 	log.Printf("transfer: %v (%v) -> %v (%v)\n", from, from.RemoteAddr(), to, to.RemoteAddr())
 
 	defer wg.Done()
+
 	for {
 		n, err := io.Copy(to, from)
 		if err == io.EOF || n == 0 {
+			to.Close()
+			from.Close()
 			break
 		}
 		if err != nil {
 			log.Printf("io.Copy failed: %v", err)
-			//break
 			continue
 		}
 	}
@@ -133,7 +136,7 @@ func transferDebug(to, from net.Conn, wg *sync.WaitGroup) {
 	}
 }
 
-func dialOnDevice(ip string, port uint16, device string) net.Conn {
+func dialOnDevice(ip string, port uint16, device string, ctx context.Context) net.Conn {
 	dialer := &net.Dialer{
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
@@ -148,7 +151,7 @@ func dialOnDevice(ip string, port uint16, device string) net.Conn {
 	}
 
 	log.Printf("dialing %s:%d dev: %s", ip, port, device)
-	c, err := dialer.Dial("tcp", fmt.Sprintf("%s:%d", ip, port))
+	c, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", ip, port))
 	if err != nil {
 		log.Printf("could not dial %s:%d: %v", ip, port, err)
 	}
@@ -158,17 +161,47 @@ func dialOnDevice(ip string, port uint16, device string) net.Conn {
 
 func dial(ip string, port uint16) net.Conn {
 	//devices := []string{"enp0s31f6", "wlp3s0", "tap0"}
+	var wg sync.WaitGroup
+
 	devices := []string{"lo", "tap0"}
 
 	var conn net.Conn
 
+	contexts := make(map[string]context.CancelFunc, len(devices))
+	var contextsMutex sync.Mutex
+
+	wg.Add(len(devices))
+
 	for _, dev := range devices {
-		// TODO: parallelize and cancel
-		conn = dialOnDevice(ip, port, dev)
-		if conn != nil {
-			return conn
-		}
+		go func(dev string) {
+			defer wg.Done()
+			ctx, cancel := context.WithCancel(context.Background())
+
+			contextsMutex.Lock()
+			contexts[dev] = cancel
+			contextsMutex.Unlock()
+
+			devConn := dialOnDevice(ip, port, dev, ctx)
+			if devConn != nil {
+				conn = devConn
+				log.Printf("successful conn via %s", dev)
+				// cancel all other dials
+				for _, otherdev := range devices {
+					if dev == otherdev {
+						continue
+					}
+
+					log.Printf("cancelling dev %s", otherdev)
+					contextsMutex.Lock()
+					contexts[otherdev]()
+					contextsMutex.Unlock()
+				}
+
+			}
+		}(dev)
 	}
+
+	wg.Wait()
 
 	return conn
 }
@@ -196,9 +229,6 @@ func handleRequest(conn net.Conn) {
 	go transfer(serverConn, conn, &wg)
 
 	wg.Wait()
-
-	conn.Close()
-	serverConn.Close()
 }
 
 func main() {
