@@ -7,16 +7,12 @@ backend: *.go
 	go build .
 	go vet
 	go fmt
-	go test -race
 	go build -race
 
 clean:
 	rm -fv t2proxy
 
 mrproper: clean
-
-docker-build: Dockerfile testclient/Dockerfile docker-compose.yml
-	docker-compose build
 
 docker: docker-build
 	docker build -t t2 --build-arg USER_ID=$(shell id -u) --build-arg GROUP_ID=$(shell id -g) .

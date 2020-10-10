@@ -1,14 +1,41 @@
-FROM ubuntu
-RUN apt-get update && apt-get install -y golang curl git
-RUN mkdir -v /t2proxy
-RUN mkdir -v /go
-COPY . /t2proxy/
-ENV GOPATH /go
-ENV PATH ${PATH}:/go/bin
-RUN echo "export GOPATH=/go >> /root/.bashrc"
-RUN echo "export PATH=$PATH/go/bin >> /root/.bashrc"
-RUN go get golang.org/x/tools/cmd/goimports
-RUN go get github.com/LiamHaworth/go-tproxy
-RUN make -C /t2proxy
+FROM ubuntu:20.04
 
-CMD ["/t2proxy/t2proxy"]
+ARG USER_ID
+ARG GROUP_ID
+
+ENV DEBIAN_FRONTEND noninteractive
+
+RUN apt-get update && \
+	apt-get install -y \
+	golang \
+	curl \
+	git \
+	make \
+	gdb
+RUN apt-get update && \
+	apt-get install -y \
+	build-essential \
+	iptables \
+	vim \
+	tmux \
+	iproute2 \
+	iputils-ping \
+	netcat \
+	telnet
+
+RUN /bin/yes | unminimize
+
+RUN groupadd -g ${GROUP_ID} dev
+RUN useradd -ms /bin/bash dev -u ${USER_ID} -g ${GROUP_ID}
+
+RUN mkdir -v /t2proxy
+RUN mkdir -v /root/go
+ENV GOPATH /root/go
+ENV PATH ${PATH}:/root/go/bin
+RUN go get golang.org/x/tools/cmd/goimports
+RUN echo "export GOPATH=/root/go >> /root/.bashrc"
+RUN echo "export PATH=$PATH/root/go/bin >> /root/.bashrc"
+
+#COPY . /t2proxy/
+WORKDIR /t2proxy
+#CMD ["/t2proxy/t2proxy"]
