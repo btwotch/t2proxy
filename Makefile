@@ -7,6 +7,7 @@ backend: *.go
 	go build .
 	go vet
 	go fmt
+	go test -race
 	go build -race
 
 clean:
