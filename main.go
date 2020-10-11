@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -77,7 +78,11 @@ func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err erro
 	return
 }
 
-func transfer(to, from net.Conn, wg *sync.WaitGroup) {
+type RequestHandler struct {
+	devices []string
+}
+
+func (req *RequestHandler) transfer(to, from net.Conn, wg *sync.WaitGroup) {
 	log.Printf("transfer: %v (%v) -> %v (%v)\n", from, from.RemoteAddr(), to, to.RemoteAddr())
 
 	defer wg.Done()
@@ -99,7 +104,7 @@ func transfer(to, from net.Conn, wg *sync.WaitGroup) {
 }
 
 // copy from one socket to another manually
-func transferDebug(to, from net.Conn, wg *sync.WaitGroup) {
+func (req *RequestHandler) transferDebug(to, from net.Conn, wg *sync.WaitGroup) {
 	log.Printf("transfer: %v (%v) -> %v (%v)\n", from, from.RemoteAddr(), to, to.RemoteAddr())
 
 	defer wg.Done()
@@ -136,7 +141,7 @@ func transferDebug(to, from net.Conn, wg *sync.WaitGroup) {
 	}
 }
 
-func dialOnDevice(ip string, port uint16, device string, ctx context.Context) net.Conn {
+func (req *RequestHandler) dialOnDevice(ip string, port uint16, device string, ctx context.Context) net.Conn {
 	dialer := &net.Dialer{
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
@@ -159,20 +164,17 @@ func dialOnDevice(ip string, port uint16, device string, ctx context.Context) ne
 	return c
 }
 
-func dial(ip string, port uint16) net.Conn {
-	//devices := []string{"enp0s31f6", "wlp3s0", "tap0"}
+func (req *RequestHandler) dial(ip string, port uint16) net.Conn {
 	var wg sync.WaitGroup
-
-	devices := []string{"lo", "tap0"}
 
 	var conn net.Conn
 
-	contexts := make(map[string]context.CancelFunc, len(devices))
+	contexts := make(map[string]context.CancelFunc, len(req.devices))
 	var contextsMutex sync.Mutex
 
-	wg.Add(len(devices))
+	wg.Add(len(req.devices))
 
-	for _, dev := range devices {
+	for _, dev := range req.devices {
 		go func(dev string) {
 			defer wg.Done()
 			ctx, cancel := context.WithCancel(context.Background())
@@ -181,12 +183,11 @@ func dial(ip string, port uint16) net.Conn {
 			contexts[dev] = cancel
 			contextsMutex.Unlock()
 
-			devConn := dialOnDevice(ip, port, dev, ctx)
+			devConn := req.dialOnDevice(ip, port, dev, ctx)
 			if devConn != nil {
 				conn = devConn
-				log.Printf("successful conn via %s", dev)
 				// cancel all other dials
-				for _, otherdev := range devices {
+				for _, otherdev := range req.devices {
 					if dev == otherdev {
 						continue
 					}
@@ -206,7 +207,7 @@ func dial(ip string, port uint16) net.Conn {
 	return conn
 }
 
-func handleRequest(conn net.Conn) {
+func (req *RequestHandler) handleRequest(conn net.Conn) {
 	var wg sync.WaitGroup
 
 	ip, port, err := getOriginalDst(conn.(*net.TCPConn))
@@ -214,7 +215,7 @@ func handleRequest(conn net.Conn) {
 		log.Fatalf("getOriginalDst: %v", err)
 	}
 
-	serverConn := dial(ip, port)
+	serverConn := req.dial(ip, port)
 
 	if serverConn == nil {
 		log.Printf("Calling %s:%d unsuccessful", ip, port)
@@ -225,14 +226,13 @@ func handleRequest(conn net.Conn) {
 
 	wg.Add(2)
 
-	go transfer(conn, serverConn, &wg)
-	go transfer(serverConn, conn, &wg)
+	go req.transfer(conn, serverConn, &wg)
+	go req.transfer(serverConn, conn, &wg)
 
 	wg.Wait()
 }
 
 func main() {
-
 	var err error
 
 	l, err := net.Listen("tcp", "127.0.0.1:3129")
@@ -242,12 +242,17 @@ func main() {
 
 	defer l.Close()
 
+	devs := defaultRouteDevices()
+	log.Printf("Devices with default route: %s", strings.Join(devs, ","))
+
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			log.Fatalf("accept: %v", err)
 		}
 
-		handleRequest(conn)
+		var req RequestHandler
+		req.devices = devs
+		req.handleRequest(conn)
 	}
 }
