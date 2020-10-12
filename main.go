@@ -251,8 +251,10 @@ func main() {
 			log.Fatalf("accept: %v", err)
 		}
 
-		var req RequestHandler
-		req.devices = devs
-		req.handleRequest(conn)
+		go func(conn net.Conn) {
+			var req RequestHandler
+			req.devices = devs
+			req.handleRequest(conn)
+		}(conn)
 	}
 }
