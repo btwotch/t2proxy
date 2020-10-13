@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 )
 
 type IpTrie struct {
 	dev  string
 	its  map[byte]*IpTrie
 	name byte
+	sync.Mutex
 }
 
 func makeIpTrie(device string, name byte) *IpTrie {
@@ -27,10 +29,17 @@ func makeIpTrie(device string, name byte) *IpTrie {
 func (it *IpTrie) insertChild(val byte, device string) *IpTrie {
 	var ret *IpTrie
 
+	it.Lock()
+	defer it.Unlock()
+
 	ret, ok := it.its[val]
 	if !ok {
 		ret = makeIpTrie(device, val)
 		it.its[val] = ret
+	} else {
+		ret.Lock()
+		ret.dev = device
+		ret.Unlock()
 	}
 
 	return ret
@@ -43,6 +52,9 @@ func (it *IpTrie) findIPv4(val net.IP) (*IpTrie, int) {
 
 	i := it
 	for _, b := range bytes {
+		i.Lock()
+		defer i.Unlock()
+
 		c, ok := i.its[b]
 		if ok {
 			i = c
@@ -60,6 +72,16 @@ func (it *IpTrie) device(val net.IP) string {
 	i, _ := it.findIPv4(val)
 
 	return i.dev
+}
+
+func (it *IpTrie) deviceFix(val net.IP) string {
+	i, depth := it.findIPv4(val)
+
+	if depth == len(val.To4()) {
+		return i.dev
+	}
+
+	return ""
 }
 
 func (it *IpTrie) insertIPv4Fix(val net.IP, device string) {
@@ -99,8 +121,16 @@ func (it *IpTrie) insertHostFix(address string, device string) {
 }
 
 func (it *IpTrie) dump(pre string, depth int) {
+	it.Lock()
+	defer it.Unlock()
+
 	for k, v := range it.its {
-		newPre := fmt.Sprintf("%s.%d", pre, k)
+		var newPre string
+		if pre == "" {
+			newPre = fmt.Sprintf("%d", k)
+		} else {
+			newPre = fmt.Sprintf("%s.%d", pre, k)
+		}
 		v.dump(newPre, depth+1)
 	}
 
