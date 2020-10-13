@@ -1,0 +1,6 @@
+connect-timeout-ms: 1001
+devices: ["eth0", "tap0"]
+fixed-devices:
+  8.8.8.8: "lo"
+  8.8.4.4: "lo"
+  "microsoft.com": "lo"

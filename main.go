@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/spf13/viper"
 )
 
 const SO_ORIGINAL_DST = 80
@@ -79,7 +81,9 @@ func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err erro
 }
 
 type RequestHandler struct {
-	devices []string
+	devices        []string
+	ips            *IpTrie
+	connectTimeout int
 }
 
 func (req *RequestHandler) transfer(to, from net.Conn, wg *sync.WaitGroup) {
@@ -94,7 +98,11 @@ func (req *RequestHandler) transfer(to, from net.Conn, wg *sync.WaitGroup) {
 			from.Close()
 			break
 		}
-		if err != nil {
+		switch err.(type) {
+		case *net.OpError:
+			continue
+		case nil:
+		default:
 			log.Printf("io.Copy failed: %v", err)
 			continue
 		}
@@ -152,10 +160,10 @@ func (req *RequestHandler) dialOnDevice(ip string, port uint16, device string, c
 				}
 			})
 		},
-		Timeout: 5 * time.Second,
+		Timeout: time.Duration(req.connectTimeout) * time.Millisecond,
 	}
 
-	log.Printf("dialing %s:%d dev: %s", ip, port, device)
+	log.Printf("dialing %s:%d dev: %s timeout: %d ms", ip, port, device, req.connectTimeout)
 	c, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", ip, port))
 	if err != nil {
 		log.Printf("could not dial %s:%d: %v", ip, port, err)
@@ -164,17 +172,34 @@ func (req *RequestHandler) dialOnDevice(ip string, port uint16, device string, c
 	return c
 }
 
-func (req *RequestHandler) dial(ip string, port uint16) net.Conn {
+func (req *RequestHandler) dialSequential(ip string, port uint16, devices []string) net.Conn {
+	var conn net.Conn
+
+	for _, dev := range devices {
+		ctx := context.Background()
+
+		conn = req.dialOnDevice(ip, port, dev, ctx)
+		if conn != nil {
+			ipBytes := net.ParseIP(ip).To4()
+			req.ips.insertIPv4(ipBytes, dev)
+			return conn
+		}
+	}
+
+	return conn
+}
+
+func (req *RequestHandler) dialParallel(ip string, port uint16, devices []string) net.Conn {
 	var wg sync.WaitGroup
 
 	var conn net.Conn
 
-	contexts := make(map[string]context.CancelFunc, len(req.devices))
+	contexts := make(map[string]context.CancelFunc, len(devices))
 	var contextsMutex sync.Mutex
 
-	wg.Add(len(req.devices))
+	wg.Add(len(devices))
 
-	for _, dev := range req.devices {
+	for _, dev := range devices {
 		go func(dev string) {
 			defer wg.Done()
 			ctx, cancel := context.WithCancel(context.Background())
@@ -186,8 +211,10 @@ func (req *RequestHandler) dial(ip string, port uint16) net.Conn {
 			devConn := req.dialOnDevice(ip, port, dev, ctx)
 			if devConn != nil {
 				conn = devConn
+				ipBytes := net.ParseIP(ip).To4()
+				req.ips.insertIPv4(ipBytes, dev)
 				// cancel all other dials
-				for _, otherdev := range req.devices {
+				for _, otherdev := range devices {
 					if dev == otherdev {
 						continue
 					}
@@ -203,6 +230,25 @@ func (req *RequestHandler) dial(ip string, port uint16) net.Conn {
 	}
 
 	wg.Wait()
+
+	return conn
+}
+
+func (req *RequestHandler) dial(ip string, port uint16) net.Conn {
+	var conn net.Conn
+
+	fixDevice := req.ips.deviceFix(net.ParseIP(ip).To4())
+	if fixDevice != "" {
+		devices := []string{fixDevice}
+		for _, dev := range req.devices {
+			if dev != fixDevice {
+				devices = append(devices, dev)
+			}
+		}
+		conn = req.dialSequential(ip, port, devices)
+	} else {
+		conn = req.dialParallel(ip, port, req.devices)
+	}
 
 	return conn
 }
@@ -235,6 +281,18 @@ func (req *RequestHandler) handleRequest(conn net.Conn) {
 func main() {
 	var err error
 
+	viper.SetConfigName("t2proxy")
+	viper.AddConfigPath("/etc")
+	viper.AddConfigPath("$HOME/.t2proxy")
+	viper.AddConfigPath(".")
+
+	viper.SetDefault("connect-timeout-ms", 1000)
+
+	err = viper.ReadInConfig()
+	if err != nil {
+		log.Fatalf("could not read config: %v", err)
+	}
+
 	l, err := net.Listen("tcp", "127.0.0.1:3129")
 	if err != nil {
 		log.Fatalf("could not listen: %v", err)
@@ -242,8 +300,30 @@ func main() {
 
 	defer l.Close()
 
-	devs := defaultRouteDevices()
-	log.Printf("Devices with default route: %s", strings.Join(devs, ","))
+	it := makeIpTrie("", 0)
+
+	for k, v := range viper.GetStringMapString("fixed-devices") {
+		it.insertHostFix(k, v)
+	}
+
+	devs := make([]string, 0)
+	defaultDevs := defaultRouteDevices()
+
+	defaultDevsMap := make(map[string]bool)
+	for _, dev := range defaultDevs {
+		defaultDevsMap[dev] = true
+	}
+
+	for _, dev := range viper.GetStringSlice("devices") {
+		if defaultDevsMap[dev] {
+			devs = append(devs, dev)
+		}
+	}
+
+	if len(devs) == 0 {
+		devs = defaultDevs
+	}
+	log.Printf("Devices with default route: %s", strings.Join(devs, ", "))
 
 	for {
 		conn, err := l.Accept()
@@ -253,6 +333,8 @@ func main() {
 
 		go func(conn net.Conn) {
 			var req RequestHandler
+			req.ips = it
+			req.connectTimeout = viper.GetInt("connect-timeout-ms")
 			req.devices = devs
 			req.handleRequest(conn)
 		}(conn)
