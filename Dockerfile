@@ -11,6 +11,7 @@ RUN apt-get update && \
 	curl \
 	git \
 	make \
+	strace \
 	gdb
 RUN apt-get update && \
 	apt-get install -y \
@@ -22,6 +23,9 @@ RUN apt-get update && \
 	iputils-ping \
 	netcat \
 	telnet
+RUN apt-get update && \
+	apt-get install -y \
+	systemctl
 
 RUN /bin/yes | unminimize
 
@@ -32,7 +36,6 @@ RUN mkdir -v /t2proxy
 RUN mkdir -v /root/go
 ENV GOPATH /root/go
 ENV PATH ${PATH}:/root/go/bin
-RUN go get golang.org/x/tools/cmd/goimports
 RUN echo "export GOPATH=/root/go >> /root/.bashrc"
 RUN echo "export PATH=$PATH/root/go/bin >> /root/.bashrc"
 

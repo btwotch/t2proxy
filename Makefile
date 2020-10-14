@@ -3,6 +3,7 @@
 all: backend
 
 backend: *.go
+	go get
 	goimports -l -w .
 	go build .
 	go vet
