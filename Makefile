@@ -14,6 +14,8 @@ t2proxy: *.go
 clean:
 	rm -fv t2proxy
 
+install: t2proxy
+	bash install.sh
 
 docker: docker-build
 	docker build -t t2 --build-arg USER_ID=$(shell id -u) --build-arg GROUP_ID=$(shell id -g) .

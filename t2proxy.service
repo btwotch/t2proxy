@@ -1,0 +1,7 @@
+[Unit]
+Description=t2proxy - undefault route vpns
+After=network.target network-online.target systemd-networkd.service NetworkManager.service connman.service
+
+[Service]
+User=t2proxy
+ExecStart=/usr/bin/t2proxy
