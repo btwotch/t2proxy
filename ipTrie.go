@@ -120,7 +120,7 @@ func (it *IpTrie) insertHostFix(address string, device string) {
 	}
 }
 
-func (it *IpTrie) dump(pre string, depth int) {
+func (it *IpTrie) _dump(pre string, ret *string, depth int) {
 	it.Lock()
 	defer it.Unlock()
 
@@ -131,12 +131,20 @@ func (it *IpTrie) dump(pre string, depth int) {
 		} else {
 			newPre = fmt.Sprintf("%s.%d", pre, k)
 		}
-		v.dump(newPre, depth+1)
+		v._dump(newPre, ret, depth+1)
 	}
 
 	if len(it.its) == 0 {
-		fmt.Printf("%s -> %s\n", pre, it.dev)
+		*ret = fmt.Sprintf("%s%s -> %s\n", *ret, pre, it.dev)
 	}
+}
+
+func (it *IpTrie) dump() string {
+	var ret string
+
+	it._dump("", &ret, 0)
+
+	return ret
 }
 
 func (it *IpTrie) dumpTrieElemChildren() {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
@@ -278,6 +279,17 @@ func (req *RequestHandler) handleRequest(conn net.Conn) {
 	wg.Wait()
 }
 
+func serverStatus(ip *IpTrie) {
+	srv := &http.Server{Addr: "127.0.0.1:3130"}
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		ipDump := ip.dump()
+		io.WriteString(w, ipDump)
+	})
+
+	log.Fatal(srv.ListenAndServe())
+}
+
 func main() {
 	var err error
 
@@ -324,6 +336,8 @@ func main() {
 		devs = defaultDevs
 	}
 	log.Printf("Devices with default route: %s", strings.Join(devs, ", "))
+
+	go serverStatus(it)
 
 	for {
 		conn, err := l.Accept()
