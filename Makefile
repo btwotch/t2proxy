@@ -1,20 +1,19 @@
 .PHONY: clean mrproper docker-build all backend
 
-all: backend
+all: t2proxy
 
-backend: *.go
-	go get
+t2proxy: *.go
 	goimports -l -w .
+	go get
 	go build .
 	go vet
 	go fmt
-	go test -race
+	go test -race -parallel $(shell nproc)
 	go build -race
 
 clean:
 	rm -fv t2proxy
 
-mrproper: clean
 
 docker: docker-build
 	docker build -t t2 --build-arg USER_ID=$(shell id -u) --build-arg GROUP_ID=$(shell id -g) .
