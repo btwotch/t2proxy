@@ -82,9 +82,9 @@ func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err erro
 }
 
 type RequestHandler struct {
-	devices        []string
-	ips            *IpTrie
-	connectTimeout int
+	defaultRouteDevs *defaultRouteDevices
+	ips              *IpTrie
+	connectTimeout   int
 }
 
 func (req *RequestHandler) transfer(to, from net.Conn, wg *sync.WaitGroup) {
@@ -241,14 +241,14 @@ func (req *RequestHandler) dial(ip string, port uint16) net.Conn {
 	fixDevice := req.ips.deviceFix(net.ParseIP(ip).To4())
 	if fixDevice != "" {
 		devices := []string{fixDevice}
-		for _, dev := range req.devices {
+		for _, dev := range req.defaultRouteDevs.get() {
 			if dev != fixDevice {
 				devices = append(devices, dev)
 			}
 		}
 		conn = req.dialSequential(ip, port, devices)
 	} else {
-		conn = req.dialParallel(ip, port, req.devices)
+		conn = req.dialParallel(ip, port, req.defaultRouteDevs.get())
 	}
 
 	return conn
@@ -290,6 +290,20 @@ func serverStatus(ip *IpTrie) {
 	log.Fatal(srv.ListenAndServe())
 }
 
+func updateDefaultRouteDevs(drd *defaultRouteDevices) {
+
+	updateMs := viper.GetInt("device-update-interval-ms")
+	if updateMs == 0 {
+		return
+	}
+
+	for {
+		time.Sleep(time.Duration(updateMs) * time.Millisecond)
+		drd.update()
+		log.Printf("Updated devices with default route: %s", strings.Join(drd.get(), ", "))
+	}
+}
+
 func main() {
 	var err error
 
@@ -299,6 +313,7 @@ func main() {
 	viper.AddConfigPath(".")
 
 	viper.SetDefault("connect-timeout-ms", 1000)
+	viper.SetDefault("device-update-interval-ms", 30000)
 
 	err = viper.ReadInConfig()
 	if err != nil {
@@ -318,24 +333,9 @@ func main() {
 		it.insertHostFix(k, v)
 	}
 
-	devs := make([]string, 0)
-	defaultDevs := defaultRouteDevices()
-
-	defaultDevsMap := make(map[string]bool)
-	for _, dev := range defaultDevs {
-		defaultDevsMap[dev] = true
-	}
-
-	for _, dev := range viper.GetStringSlice("devices") {
-		if defaultDevsMap[dev] {
-			devs = append(devs, dev)
-		}
-	}
-
-	if len(devs) == 0 {
-		devs = defaultDevs
-	}
-	log.Printf("Devices with default route: %s", strings.Join(devs, ", "))
+	defaultDevs := makeDefaultRouteDevices(viper.GetStringSlice("devices"))
+	log.Printf("Devices with default route: %s", strings.Join(defaultDevs.get(), ", "))
+	go updateDefaultRouteDevs(defaultDevs)
 
 	go serverStatus(it)
 
@@ -349,7 +349,7 @@ func main() {
 			var req RequestHandler
 			req.ips = it
 			req.connectTimeout = viper.GetInt("connect-timeout-ms")
-			req.devices = devs
+			req.defaultRouteDevs = defaultDevs
 			req.handleRequest(conn)
 		}(conn)
 	}

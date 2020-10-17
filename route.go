@@ -7,7 +7,24 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"sync"
 )
+
+type defaultRouteDevices struct {
+	devs          []string
+	preferredDevs []string
+	sync.RWMutex
+}
+
+func makeDefaultRouteDevices(preferredDevs []string) *defaultRouteDevices {
+	drd := defaultRouteDevices{}
+
+	drd.preferredDevs = preferredDevs
+
+	drd.update()
+
+	return &drd
+}
 
 func parseHexIPv4(hex string) [4]byte {
 	var ret [4]byte
@@ -83,10 +100,61 @@ func routes() []Route {
 	return routes
 }
 
-func defaultRouteDevices() []string {
-	devs := make([]string, 0)
+func mergeDevs(devs, preferredDevs []string) []string {
+	newDevs := make([]string, 0)
+
+	devsMap := make(map[string]bool)
+	for _, dev := range devs {
+		devsMap[dev] = true
+	}
+	preferredDevsMap := make(map[string]bool)
+	for _, dev := range preferredDevs {
+		preferredDevsMap[dev] = true
+	}
+
+	for _, preferredDev := range preferredDevs {
+		if preferredDev == "*" {
+			for dev, toBeInserted := range devsMap {
+				if !toBeInserted {
+					continue
+				}
+				// check if device has lower prio then '*'
+				if preferredDevsMap[dev] {
+					continue
+				}
+
+				newDevs = append(newDevs, dev)
+				devsMap[dev] = false
+				preferredDevsMap[dev] = false
+			}
+		} else if devsMap[preferredDev] == true {
+			devsMap[preferredDev] = false
+			preferredDevsMap[preferredDev] = false
+			newDevs = append(newDevs, preferredDev)
+		}
+	}
+
+	return newDevs
+}
+
+func (drd *defaultRouteDevices) get() []string {
+	drd.RLock()
+	defer drd.RUnlock()
+
+	devs := make([]string, len(drd.devs))
+
+	copy(devs, drd.devs)
+
+	return devs
+}
+
+func (drd *defaultRouteDevices) update() {
+	drd.Lock()
+	defer drd.Unlock()
 
 	defaultGw := net.IPv4(0, 0, 0, 0)
+
+	devs := make([]string, 0)
 
 	for _, route := range routes() {
 		if route.destination.Equal(defaultGw) {
@@ -94,5 +162,9 @@ func defaultRouteDevices() []string {
 		}
 	}
 
-	return devs
+	if len(drd.preferredDevs) == 0 {
+		drd.devs = devs
+	} else {
+		drd.devs = mergeDevs(devs, drd.preferredDevs)
+	}
 }
