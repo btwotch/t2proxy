@@ -11,7 +11,8 @@ type IpTrie struct {
 	dev  string
 	its  map[byte]*IpTrie
 	name byte
-	sync.Mutex
+	sync.RWMutex
+	redirectIp *net.IP
 }
 
 func makeIpTrie(device string, name byte) *IpTrie {
@@ -84,7 +85,7 @@ func (it *IpTrie) deviceFix(val net.IP) string {
 	return ""
 }
 
-func (it *IpTrie) insertIPv4Fix(val net.IP, device string) {
+func (it *IpTrie) insertIPv4Fix(val net.IP, device string, redirect *net.IP) {
 	bytes := val.To4()
 
 	c := it
@@ -92,6 +93,8 @@ func (it *IpTrie) insertIPv4Fix(val net.IP, device string) {
 	for i := 0; i < len(bytes); i++ {
 		c = c.insertChild(bytes[i], device)
 	}
+
+	c.redirectIp = redirect
 }
 
 func (it *IpTrie) insertIPv4(val net.IP, device string) {
@@ -105,7 +108,7 @@ func (it *IpTrie) insertIPv4(val net.IP, device string) {
 	i.insertChild(bytes[depth], device)
 }
 
-func (it *IpTrie) insertHostFix(address string, device string) {
+func (it *IpTrie) insertFix(address string, device string, redirect *net.IP) {
 	addrs, err := net.LookupIP(address)
 	if err != nil {
 		log.Printf("Looking up host %s failed: %v", address, err)
@@ -116,8 +119,37 @@ func (it *IpTrie) insertHostFix(address string, device string) {
 		if addr.To4() == nil {
 			continue
 		}
-		it.insertIPv4Fix(addr, device)
+		it.insertIPv4Fix(addr, device, redirect)
 	}
+}
+
+func (it *IpTrie) insertHostFix(address string, device string) {
+	it.insertFix(address, device, nil)
+}
+
+func (it *IpTrie) insertRedirectFix(address string, redirect net.IP) {
+	it.insertFix(address, "", &redirect)
+}
+
+func (it *IpTrie) redirect() net.IP {
+	it.RLock()
+	defer it.RUnlock()
+
+	return *it.redirectIp
+}
+
+func (it *IpTrie) redirectFix(val net.IP) net.IP {
+	i, depth := it.findIPv4(val)
+
+	if depth == len(val.To4()) {
+		i.RLock()
+		defer i.RUnlock()
+		if i.redirectIp != nil {
+			return *i.redirectIp
+		}
+	}
+
+	return val
 }
 
 func (it *IpTrie) _dump(pre string, ret *string, depth int) {
@@ -135,7 +167,11 @@ func (it *IpTrie) _dump(pre string, ret *string, depth int) {
 	}
 
 	if len(it.its) == 0 {
-		*ret = fmt.Sprintf("%s%s -> %s\n", *ret, pre, it.dev)
+		redirectIp := ""
+		if it.redirectIp != nil {
+			redirectIp = it.redirectIp.String()
+		}
+		*ret = fmt.Sprintf("%s%s -> %s on dev %s\n", *ret, pre, redirectIp, it.dev)
 	}
 }
 

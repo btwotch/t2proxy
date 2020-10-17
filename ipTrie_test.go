@@ -39,13 +39,13 @@ func TestTrie(t *testing.T) {
 	}
 	wg.Add(len(insertIpsFix))
 	for _, i := range insertIpsFix {
-		it.insertIPv4Fix(i.ip, i.dev)
+		it.insertIPv4Fix(i.ip, i.dev, nil)
 		wg.Done()
 	}
 	wg.Wait()
 	//it.insertHostFix("heise.de", "heise-device")
 
-	it.insertIPv4Fix(net.IPv4(10, 17, 0, 2), "tener2")
+	it.insertIPv4Fix(net.IPv4(10, 17, 0, 2), "tener2", nil)
 
 	ips := []ipDev{
 		{net.IPv4(172, 17, 0, 1), "tap0"},

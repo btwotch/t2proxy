@@ -2,3 +2,4 @@ connect-timeout-ms: 1001
 devices:
 device-update-interval-ms: 30000
 fixed-devices:
+redirect-ips:

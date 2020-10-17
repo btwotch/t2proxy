@@ -238,7 +238,16 @@ func (req *RequestHandler) dialParallel(ip string, port uint16, devices []string
 func (req *RequestHandler) dial(ip string, port uint16) net.Conn {
 	var conn net.Conn
 
-	fixDevice := req.ips.deviceFix(net.ParseIP(ip).To4())
+	ipVal := net.ParseIP(ip).To4()
+
+	redirectIpVal := req.ips.redirectFix(ipVal)
+	redirectIp := redirectIpVal.String()
+
+	if redirectIp != ip {
+		log.Printf("Rerouting %s to %s", ip, redirectIp)
+	}
+
+	fixDevice := req.ips.deviceFix(redirectIpVal)
 	if fixDevice != "" {
 		devices := []string{fixDevice}
 		for _, dev := range req.defaultRouteDevs.get() {
@@ -246,9 +255,9 @@ func (req *RequestHandler) dial(ip string, port uint16) net.Conn {
 				devices = append(devices, dev)
 			}
 		}
-		conn = req.dialSequential(ip, port, devices)
+		conn = req.dialSequential(redirectIp, port, devices)
 	} else {
-		conn = req.dialParallel(ip, port, req.defaultRouteDevs.get())
+		conn = req.dialParallel(redirectIp, port, req.defaultRouteDevs.get())
 	}
 
 	return conn
@@ -331,6 +340,10 @@ func main() {
 
 	for k, v := range viper.GetStringMapString("fixed-devices") {
 		it.insertHostFix(k, v)
+	}
+
+	for k, v := range viper.GetStringMapString("redirect-ips") {
+		it.insertRedirectFix(k, net.ParseIP(v).To4())
 	}
 
 	defaultDevs := makeDefaultRouteDevices(viper.GetStringSlice("devices"))
