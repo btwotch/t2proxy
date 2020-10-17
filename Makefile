@@ -3,8 +3,8 @@
 all: t2proxy
 
 t2proxy: *.go
-	go get
 	goimports -l -w .
+	go get
 	go build .
 	go vet
 	go fmt
