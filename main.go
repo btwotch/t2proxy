@@ -235,16 +235,14 @@ func (req *RequestHandler) dialParallel(ip string, port uint16, devices []string
 	return conn
 }
 
-func (req *RequestHandler) dial(ip string, port uint16) net.Conn {
+func (req *RequestHandler) dial(ipVal net.IP, port uint16) net.Conn {
 	var conn net.Conn
-
-	ipVal := net.ParseIP(ip).To4()
 
 	redirectIpVal := req.ips.redirectFix(ipVal)
 	redirectIp := redirectIpVal.String()
 
-	if redirectIp != ip {
-		log.Printf("Rerouting %s to %s", ip, redirectIp)
+	if redirectIp != ipVal.String() {
+		log.Printf("Rerouting %+v to %+v", ipVal, redirectIp)
 	}
 
 	fixDevice := req.ips.deviceFix(redirectIpVal)
@@ -263,6 +261,7 @@ func (req *RequestHandler) dial(ip string, port uint16) net.Conn {
 	return conn
 }
 
+/*
 func (req *RequestHandler) handleRequest(conn net.Conn) {
 	var wg sync.WaitGroup
 
@@ -286,6 +285,83 @@ func (req *RequestHandler) handleRequest(conn net.Conn) {
 	go req.transfer(serverConn, conn, &wg)
 
 	wg.Wait()
+}
+*/
+
+func (req *RequestHandler) handleRequest(conn net.Conn, ip net.IP, port uint16) {
+	var wg sync.WaitGroup
+	serverConn := req.dial(ip, port)
+
+	if serverConn == nil {
+		log.Printf("Calling %s:%d unsuccessful", ip, port)
+		return
+	}
+
+	log.Printf("Calling %s:%d successful", ip, port)
+
+	wg.Add(2)
+
+	go req.transfer(conn, serverConn, &wg)
+	go req.transfer(serverConn, conn, &wg)
+
+	wg.Wait()
+}
+
+func (req *RequestHandler) handleRequestTransparent(conn net.Conn) {
+	ip, port, err := getOriginalDst(conn.(*net.TCPConn))
+	if err != nil {
+		log.Fatalf("getOriginalDst: %v", err)
+	}
+
+	req.handleRequest(conn, net.ParseIP(ip), port)
+}
+
+func (req *RequestHandler) handleRequestSocks4(conn net.Conn) {
+	requestBuf := make([]byte, 256)
+	bytesRead, err := conn.Read(requestBuf)
+	if err != nil {
+		log.Fatalf("read: %v", err)
+	}
+
+	if bytesRead < 7 {
+		log.Printf("request message too short")
+		conn.Close()
+		return
+	}
+	if requestBuf[bytesRead-1] != 0x0 {
+		log.Printf("request too long")
+		conn.Close()
+		return
+	}
+
+	if requestBuf[0] != 0x4 {
+		log.Printf("only socks4 supported - sorry!")
+		conn.Close()
+		return
+	}
+	if requestBuf[1] != 0x1 {
+		log.Printf("unsupported command 0x%x", requestBuf[1])
+		conn.Close()
+		return
+	}
+	port := uint16(requestBuf[2])*256 + uint16(requestBuf[3])
+
+	ip := net.IPv4(requestBuf[4], requestBuf[5], requestBuf[6], requestBuf[7])
+	log.Printf("socks connection to %+v:%d\n", ip, port)
+
+	responseBuf := make([]byte, 8)
+	responseBuf[0] = 0x0
+	responseBuf[1] = 0x5A
+	responseBuf[2] = 0x0
+	responseBuf[3] = 0x0
+	responseBuf[4] = 0x0
+	responseBuf[5] = 0x0
+	responseBuf[6] = 0x0
+	responseBuf[7] = 0x0
+
+	conn.Write(responseBuf)
+
+	req.handleRequest(conn, ip, port)
 }
 
 func serverStatus(ip *IpTrie) {
@@ -329,13 +405,6 @@ func main() {
 		log.Fatalf("could not read config: %v", err)
 	}
 
-	l, err := net.Listen("tcp", "127.0.0.1:3129")
-	if err != nil {
-		log.Fatalf("could not listen: %v", err)
-	}
-
-	defer l.Close()
-
 	it := makeIpTrie("", 0)
 
 	for k, v := range viper.GetStringMapString("fixed-devices") {
@@ -352,18 +421,58 @@ func main() {
 
 	go serverStatus(it)
 
-	for {
-		conn, err := l.Accept()
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		l, err := net.Listen("tcp", "127.0.0.1:3129")
 		if err != nil {
-			log.Fatalf("accept: %v", err)
+			log.Fatalf("could not listen: %v", err)
 		}
 
-		go func(conn net.Conn) {
-			var req RequestHandler
-			req.ips = it
-			req.connectTimeout = viper.GetInt("connect-timeout-ms")
-			req.defaultRouteDevs = defaultDevs
-			req.handleRequest(conn)
-		}(conn)
-	}
+		defer l.Close()
+
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				log.Fatalf("accept: %v", err)
+			}
+
+			go func(conn net.Conn) {
+				var req RequestHandler
+				req.ips = it
+				req.connectTimeout = viper.GetInt("connect-timeout-ms")
+				req.defaultRouteDevs = defaultDevs
+				req.handleRequestTransparent(conn)
+			}(conn)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		l, err := net.Listen("tcp", "127.0.0.1:1080")
+		if err != nil {
+			log.Fatalf("could not listen: %v", err)
+		}
+
+		defer l.Close()
+
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				log.Fatalf("accept: %v", err)
+			}
+
+			go func(conn net.Conn) {
+				var req RequestHandler
+				req.ips = it
+				req.connectTimeout = viper.GetInt("connect-timeout-ms")
+				req.defaultRouteDevs = defaultDevs
+				req.handleRequestSocks4(conn)
+			}(conn)
+		}
+	}()
+
+	wg.Wait()
 }
