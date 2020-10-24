@@ -17,7 +17,31 @@ import (
 	"github.com/spf13/viper"
 )
 
+type Message struct {
+    // When writing, the Buffers field must contain at least one
+    // byte to write.
+    // When reading, the Buffers field will always contain a byte
+    // to read.
+    Buffers [][]byte
+
+    // OOB contains protocol-specific control or miscellaneous
+    // ancillary data known as out-of-band data.
+    OOB []byte
+
+    // Addr specifies a destination address when writing.
+    // It can be nil when the underlying protocol of the raw
+    // connection uses connection-oriented communication.
+    // After a successful read, it may contain the source address
+    // on the received packet.
+    Addr net.Addr
+
+    N     int // # of bytes read or written from/to Buffers
+    NN    int // # of bytes read or written from/to OOB
+    Flags int // protocol-specific information on the received message
+}
+
 const SO_ORIGINAL_DST = 80
+const IP_ORIGDSTADDR = 20
 
 func itod(i uint) string {
 	if i == 0 {
@@ -43,7 +67,7 @@ func getFdFromConn(l net.Conn) int {
 	return fd
 }
 
-func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err error) {
+func getOriginalDst(clientConn net.Conn) (ipv4 string, port uint16, err error) {
 	if clientConn == nil {
 		log.Printf("copy(): oops, dst is nil!")
 		err = errors.New("ERR: clientConn is nil")
@@ -54,8 +78,8 @@ func getOriginalDst(clientConn *net.TCPConn) (ipv4 string, port uint16, err erro
 	remoteAddr := clientConn.RemoteAddr()
 	if remoteAddr == nil {
 		log.Printf("getOriginalDst(): oops, clientConn.fd is nil!")
-		err = errors.New("ERR: clientConn.fd is nil")
-		return
+		//err = errors.New("ERR: clientConn.fd is nil")
+		//return
 	}
 
 	srcipport := fmt.Sprintf("%v", clientConn.RemoteAddr())
@@ -362,6 +386,12 @@ func updateDefaultRouteDevs(drd *defaultRouteDevices) {
 	}
 }
 
+func recvorigdst(network, address string, conn syscall.RawConn) error {
+	return conn.Control(func(descriptor uintptr) {
+		syscall.SetsockoptInt(int(descriptor), syscall.IPPROTO_IP, IP_ORIGDSTADDR, 1)
+	})
+}
+
 func main() {
 	var err error
 
@@ -399,26 +429,84 @@ func main() {
 
 	go func() {
 		defer wg.Done()
-		l, err := net.Listen("tcp", "127.0.0.1:3129")
+		//listenConfig := &net.ListenConfig{Control: recvorigdst}
+		listenAddr := net.UDPAddr{Port: 3129, IP: net.IPv4(127, 0, 0, 1)}
+		l, err := net.ListenUDP("udp", &listenAddr)
+		//l, err := listenConfig.ListenPacket(context.Background(), "udp", "127.0.0.1:3129")
 		if err != nil {
 			log.Fatalf("could not listen: %v", err)
 		}
 
+		file, err := l.File()
+		if err != nil {
+			log.Fatalf("could not file: %v", err)
+		}
+		//syscall.SetsockoptInt(int(file.Fd()), syscall.IPPROTO_IP, IP_ORIGDSTADDR, 1)
+		syscall.SetsockoptInt(int(file.Fd()), syscall.IPPROTO_IP, 6 /*recvopts*/, 1)
+		syscall.SetsockoptInt(int(file.Fd()), syscall.IPPROTO_IP, 6 /*recvopts*/, 1)
+		syscall.SetsockoptInt(int(file.Fd()), syscall.IPPROTO_IP, 8 /*pktinfo*/, 1)
+		syscall.SetsockoptInt(int(file.Fd()), syscall.SOL_IP, syscall.IP_TRANSPARENT, 1)
+
+
+
+/*
+		rawc, err := l.SyscallConn()
+		if err != nil {
+			log.Fatalf("could not SyscallConn: %v", err)
+		}
+		rawc.Control = recvorigdst
+*/
+
 		defer l.Close()
 
 		for {
-			conn, err := l.Accept()
+
+			oob := make([]byte, 65536)
+			payload := make([]byte, 65536)
+			//l.ReadMsgUDP(payload, oob)
+			n, oobn, recvflag, from, err := syscall.Recvmsg(int(file.Fd()), payload, oob, syscall.MSG_OOB)
 			if err != nil {
-				log.Fatalf("accept: %v", err)
+				log.Fatalf("could not read: %v", err)
+			}
+			fmt.Printf("payload %d: %+v\noob %d: %+v\nrecvflag: %+v\nfrom: %+v\n\n", n, payload[0:n], oobn, oob[0:oobn], recvflag, from)
+
+/*
+			//fooType := reflect.TypeOf(l)
+			fooType := reflect.TypeOf(l)
+			for i := 0; i < fooType.NumMethod(); i++ {
+				method := fooType.Method(i)
+				fmt.Println(method.Name)
 			}
 
-			go func(conn net.Conn) {
-				var req RequestHandler
-				req.ips = it
-				req.connectTimeout = viper.GetInt("connect-timeout-ms")
-				req.defaultRouteDevs = defaultDevs
-				req.handleRequestTransparent(conn)
-			}(conn)
+			ms := make([]Message, 100)
+			inputs := make([]reflect.Value, 2)
+			inputs[0] = reflect.ValueOf(ms)
+			inputs[1] = reflect.ValueOf(0)
+			v := reflect.ValueOf(l)
+			call := v.MethodByName("RecvMsgs").Call(inputs)
+			//pfd := reflect.Indirect(netFD.FieldByName("pfd"))
+			//fd := int(pfd.FieldByName("Sysfd").Int())
+
+			//l.RecvMsgs(ms, 0)
+			fmt.Printf("call: %+v\n", call)
+			fmt.Printf("ms: %+v\n", ms)
+*/
+
+
+			/*
+				conn, err := l.Accept()
+				if err != nil {
+					log.Fatalf("accept: %v", err)
+				}
+
+				go func(conn net.Conn) {
+					var req RequestHandler
+					req.ips = it
+					req.connectTimeout = viper.GetInt("connect-timeout-ms")
+					req.defaultRouteDevs = defaultDevs
+					req.handleRequestTransparent(conn)
+				}(conn)
+			*/
 		}
 	}()
 

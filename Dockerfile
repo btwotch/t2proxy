@@ -7,12 +7,19 @@ ENV DEBIAN_FRONTEND noninteractive
 
 RUN apt-get update && \
 	apt-get install -y \
+	apt-file
+
+RUN apt-file update
+
+RUN apt-get update && \
+	apt-get install -y \
 	golang \
 	curl \
 	git \
 	make \
 	strace \
-	gdb
+	gdb \
+	psmisc
 RUN apt-get update && \
 	apt-get install -y \
 	build-essential \
@@ -22,7 +29,9 @@ RUN apt-get update && \
 	iproute2 \
 	iputils-ping \
 	netcat \
-	telnet
+	telnet \
+	bind9-dnsutils \
+	net-tools
 RUN apt-get update && \
 	apt-get install -y \
 	systemctl
