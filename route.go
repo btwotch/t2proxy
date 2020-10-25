@@ -157,7 +157,7 @@ func (drd *defaultRouteDevices) update() {
 	devs := make([]string, 0)
 
 	for _, route := range routes() {
-		if route.destination.Equal(defaultGw) {
+		if route.destination.Equal(defaultGw) && route.device != "lo" {
 			devs = append(devs, route.device)
 		}
 	}
