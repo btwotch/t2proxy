@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -16,29 +17,6 @@ import (
 
 	"github.com/spf13/viper"
 )
-
-type Message struct {
-    // When writing, the Buffers field must contain at least one
-    // byte to write.
-    // When reading, the Buffers field will always contain a byte
-    // to read.
-    Buffers [][]byte
-
-    // OOB contains protocol-specific control or miscellaneous
-    // ancillary data known as out-of-band data.
-    OOB []byte
-
-    // Addr specifies a destination address when writing.
-    // It can be nil when the underlying protocol of the raw
-    // connection uses connection-oriented communication.
-    // After a successful read, it may contain the source address
-    // on the received packet.
-    Addr net.Addr
-
-    N     int // # of bytes read or written from/to Buffers
-    NN    int // # of bytes read or written from/to OOB
-    Flags int // protocol-specific information on the received message
-}
 
 const SO_ORIGINAL_DST = 80
 const IP_ORIGDSTADDR = 20
@@ -174,7 +152,7 @@ func (req *RequestHandler) transferDebug(to, from net.Conn, wg *sync.WaitGroup) 
 	}
 }
 
-func (req *RequestHandler) dialOnDevice(ip string, port uint16, device string, ctx context.Context) net.Conn {
+func (req *RequestHandler) dialOnDevice(proto, ip string, port uint16, device string, ctx context.Context) net.Conn {
 	dialer := &net.Dialer{
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
@@ -189,7 +167,7 @@ func (req *RequestHandler) dialOnDevice(ip string, port uint16, device string, c
 	}
 
 	log.Printf("dialing %s:%d dev: %s timeout: %d ms", ip, port, device, req.connectTimeout)
-	c, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", ip, port))
+	c, err := dialer.DialContext(ctx, proto, fmt.Sprintf("%s:%d", ip, port))
 	if err != nil {
 		log.Printf("could not dial %s:%d: %v", ip, port, err)
 	}
@@ -197,13 +175,13 @@ func (req *RequestHandler) dialOnDevice(ip string, port uint16, device string, c
 	return c
 }
 
-func (req *RequestHandler) dialSequential(ip string, port uint16, devices []string) net.Conn {
+func (req *RequestHandler) dialSequential(proto, ip string, port uint16, devices []string) net.Conn {
 	var conn net.Conn
 
 	for _, dev := range devices {
 		ctx := context.Background()
 
-		conn = req.dialOnDevice(ip, port, dev, ctx)
+		conn = req.dialOnDevice(proto, ip, port, dev, ctx)
 		if conn != nil {
 			ipBytes := net.ParseIP(ip).To4()
 			req.ips.insertIPv4(ipBytes, dev)
@@ -214,7 +192,7 @@ func (req *RequestHandler) dialSequential(ip string, port uint16, devices []stri
 	return conn
 }
 
-func (req *RequestHandler) dialParallel(ip string, port uint16, devices []string) net.Conn {
+func (req *RequestHandler) dialParallel(proto, ip string, port uint16, devices []string) net.Conn {
 	var wg sync.WaitGroup
 
 	var conn net.Conn
@@ -233,7 +211,7 @@ func (req *RequestHandler) dialParallel(ip string, port uint16, devices []string
 			contexts[dev] = cancel
 			contextsMutex.Unlock()
 
-			devConn := req.dialOnDevice(ip, port, dev, ctx)
+			devConn := req.dialOnDevice(proto, ip, port, dev, ctx)
 			if devConn != nil {
 				conn = devConn
 				ipBytes := net.ParseIP(ip).To4()
@@ -259,7 +237,7 @@ func (req *RequestHandler) dialParallel(ip string, port uint16, devices []string
 	return conn
 }
 
-func (req *RequestHandler) dial(ipVal net.IP, port uint16) net.Conn {
+func (req *RequestHandler) dial(proto string, ipVal net.IP, port uint16) net.Conn {
 	var conn net.Conn
 
 	redirectIpVal := req.ips.redirectFix(ipVal)
@@ -277,17 +255,17 @@ func (req *RequestHandler) dial(ipVal net.IP, port uint16) net.Conn {
 				devices = append(devices, dev)
 			}
 		}
-		conn = req.dialSequential(redirectIp, port, devices)
+		conn = req.dialSequential(proto, redirectIp, port, devices)
 	} else {
-		conn = req.dialParallel(redirectIp, port, req.defaultRouteDevs.get())
+		conn = req.dialParallel(proto, redirectIp, port, req.defaultRouteDevs.get())
 	}
 
 	return conn
 }
 
-func (req *RequestHandler) handleRequest(conn net.Conn, ip net.IP, port uint16) {
+func (req *RequestHandler) handleRequest(conn net.Conn, proto string, ip net.IP, port uint16) {
 	var wg sync.WaitGroup
-	serverConn := req.dial(ip, port)
+	serverConn := req.dial(proto, ip, port)
 
 	if serverConn == nil {
 		log.Printf("Calling %s:%d unsuccessful", ip, port)
@@ -310,7 +288,7 @@ func (req *RequestHandler) handleRequestTransparent(conn net.Conn) {
 		log.Fatalf("getOriginalDst: %v", err)
 	}
 
-	req.handleRequest(conn, net.ParseIP(ip), port)
+	req.handleRequest(conn, "tcp", net.ParseIP(ip), port)
 }
 
 func (req *RequestHandler) handleRequestSocks4(conn net.Conn) {
@@ -358,7 +336,7 @@ func (req *RequestHandler) handleRequestSocks4(conn net.Conn) {
 
 	conn.Write(responseBuf)
 
-	req.handleRequest(conn, ip, port)
+	req.handleRequest(conn, "tcp", ip, port)
 }
 
 func serverStatus(ip *IpTrie) {
@@ -384,12 +362,6 @@ func updateDefaultRouteDevs(drd *defaultRouteDevices) {
 		drd.update()
 		log.Printf("Updated devices with default route: %s", strings.Join(drd.get(), ", "))
 	}
-}
-
-func recvorigdst(network, address string, conn syscall.RawConn) error {
-	return conn.Control(func(descriptor uintptr) {
-		syscall.SetsockoptInt(int(descriptor), syscall.IPPROTO_IP, IP_ORIGDSTADDR, 1)
-	})
 }
 
 func main() {
@@ -436,77 +408,112 @@ func main() {
 		if err != nil {
 			log.Fatalf("could not listen: %v", err)
 		}
+		defer l.Close()
 
 		file, err := l.File()
 		if err != nil {
 			log.Fatalf("could not file: %v", err)
 		}
-		//syscall.SetsockoptInt(int(file.Fd()), syscall.IPPROTO_IP, IP_ORIGDSTADDR, 1)
-		syscall.SetsockoptInt(int(file.Fd()), syscall.IPPROTO_IP, 6 /*recvopts*/, 1)
+		syscall.SetsockoptInt(int(file.Fd()), syscall.IPPROTO_IP, syscall.IP_ORIGDSTADDR, 1)
 		syscall.SetsockoptInt(int(file.Fd()), syscall.IPPROTO_IP, 6 /*recvopts*/, 1)
 		syscall.SetsockoptInt(int(file.Fd()), syscall.IPPROTO_IP, 8 /*pktinfo*/, 1)
 		syscall.SetsockoptInt(int(file.Fd()), syscall.SOL_IP, syscall.IP_TRANSPARENT, 1)
+		syscall.SetsockoptInt(int(file.Fd()), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
 
-
-
-/*
-		rawc, err := l.SyscallConn()
-		if err != nil {
-			log.Fatalf("could not SyscallConn: %v", err)
-		}
-		rawc.Control = recvorigdst
-*/
-
-		defer l.Close()
-
+		oob := make([]byte, 65536)
+		payload := make([]byte, 65536)
+		//l.ReadMsgUDP(payload, oob)
 		for {
-
-			oob := make([]byte, 65536)
-			payload := make([]byte, 65536)
-			//l.ReadMsgUDP(payload, oob)
-			n, oobn, recvflag, from, err := syscall.Recvmsg(int(file.Fd()), payload, oob, syscall.MSG_OOB)
+			n, oobn, _, to, err := syscall.Recvmsg(int(file.Fd()), payload, oob, syscall.MSG_OOB)
 			if err != nil {
 				log.Fatalf("could not read: %v", err)
 			}
-			fmt.Printf("payload %d: %+v\noob %d: %+v\nrecvflag: %+v\nfrom: %+v\n\n", n, payload[0:n], oobn, oob[0:oobn], recvflag, from)
+			fmt.Printf("payload %d: %+v\n", n, payload[0:n])
+			fmt.Printf("oob %d: %+v\n", oobn, oob[0:oobn])
+			/*
+				cm4 := new(ipv4.ControlMessage)
+				cm4.Parse(oob[0:oobn])
+				fmt.Printf("cm4: %+v\n", cm4)
+			*/
 
-/*
-			//fooType := reflect.TypeOf(l)
-			fooType := reflect.TypeOf(l)
-			for i := 0; i < fooType.NumMethod(); i++ {
-				method := fooType.Method(i)
-				fmt.Println(method.Name)
+			scmsgs, err := syscall.ParseSocketControlMessage(oob[0:oobn])
+			if err != nil {
+				log.Fatalf("parsing socket control messages: %v", err)
 			}
 
-			ms := make([]Message, 100)
-			inputs := make([]reflect.Value, 2)
-			inputs[0] = reflect.ValueOf(ms)
-			inputs[1] = reflect.ValueOf(0)
-			v := reflect.ValueOf(l)
-			call := v.MethodByName("RecvMsgs").Call(inputs)
-			//pfd := reflect.Indirect(netFD.FieldByName("pfd"))
-			//fd := int(pfd.FieldByName("Sysfd").Int())
+			var fromPort uint16
+			var fromIp net.IP
 
-			//l.RecvMsgs(ms, 0)
-			fmt.Printf("call: %+v\n", call)
-			fmt.Printf("ms: %+v\n", ms)
-*/
-
-
-			/*
-				conn, err := l.Accept()
-				if err != nil {
-					log.Fatalf("accept: %v", err)
+			for _, s := range scmsgs {
+				fmt.Printf("%+v\n", s)
+				switch s.Header.Type {
+				case syscall.IP_ORIGDSTADDR:
+					fmt.Println("orig ip")
+					fromPort = binary.BigEndian.Uint16(s.Data[2:4])
+					fromIp = net.IPv4(s.Data[4], s.Data[5], s.Data[6], s.Data[7])
+					fmt.Printf(">> ip: %+v port: %d\n", fromIp, fromPort)
+				case syscall.IP_PKTINFO:
+					fmt.Println("pktinfo")
 				}
+			}
 
-				go func(conn net.Conn) {
-					var req RequestHandler
-					req.ips = it
-					req.connectTimeout = viper.GetInt("connect-timeout-ms")
-					req.defaultRouteDevs = defaultDevs
-					req.handleRequestTransparent(conn)
-				}(conn)
-			*/
+			to4, ok := to.(*syscall.SockaddrInet4)
+			if !ok {
+				break
+			}
+			fmt.Printf("to: %+v:%d\n\n", to4.Addr, to4.Port)
+
+			laddr := net.UDPAddr{
+				IP:   net.IPv4(0, 0, 0, 0),
+				Port: int(fromPort),
+			}
+			raddr := net.UDPAddr{
+				IP:   net.IPv4(to4.Addr[0], to4.Addr[1], to4.Addr[2], to4.Addr[3]),
+				Port: to4.Port,
+			}
+
+			dialer := &net.Dialer{
+				Control: func(network, address string, c syscall.RawConn) error {
+					return c.Control(func(fd uintptr) {
+						device := "tap0"
+						err := syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, device)
+						if err != nil {
+							log.Printf("set sockopt BINDTODEVICE failed: %v", err)
+						}
+						err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+						if err != nil {
+							log.Printf("set sockopt REUSEADDR failed: %v", err)
+						}
+					})
+				},
+				LocalAddr: &laddr,
+				// TODO: add reuseADDR
+			}
+			//uconn, err := net.DialUDP("udp", &laddr, &raddr)
+			uconn, err := dialer.Dial("udp", fmt.Sprintf("%s:%d", raddr.IP, raddr.Port))
+			fmt.Printf("dialing from %+v to %+v\n", uconn.LocalAddr(), raddr)
+			if err != nil {
+				log.Fatalf("dialing from %+v to %+v failed: %v", uconn.LocalAddr(), raddr, err)
+			}
+			defer uconn.Close()
+			writtenBytes, err := uconn.Write(payload[:n])
+			if err != nil {
+				log.Fatalf("writing failed: %v", err)
+			}
+			fmt.Printf("writtenBytes: %d\n", writtenBytes)
+
+			readBytes, err := uconn.Read(payload)
+			if err != nil {
+				log.Fatalf("reading failed: %v", err)
+			}
+			fmt.Printf("readBytes: %d\n", readBytes)
+			fmt.Printf(">>> %+v\n", payload[:readBytes])
+
+			//var req RequestHandler
+			//req.ips = it
+			//req.connectTimeout = viper.GetInt("connect-timeout-ms")
+			//req.defaultRouteDevs = defaultDevs
+			//req.handleRequest(l, "udp", net.IPv4(to4.Addr[0], to4.Addr[1], to4.Addr[2], to4.Addr[3]), uint16(to4.Port))
 		}
 	}()
 
